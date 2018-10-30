@@ -87,6 +87,7 @@ int zkSessionTimeout;
 short stopOnDisconnect;
 char trafIPAddr[20];
 int aggrInterval;
+int statisticsCacheSize;
 int queryPubThreshold;
 statistics_type statisticsPubType;
 bool bStatisticsEnabled;
@@ -95,10 +96,15 @@ long initSessMemSize;
 int portMapToSecs = -1;
 int portBindToSecs = -1;
 bool bPlanEnabled = false;
-
+bool keepaliveStatus = false;
+int keepaliveIdletime;
+int keepaliveIntervaltime;
+int keepaliveRetrycount;
+long epoch = -1;
 void watcher(zhandle_t *zzh, int type, int state, const char *path, void *watcherCtx);
 bool verifyPortAvailable(const char * idForPort, int portNumber);
 BOOL getInitParamSrvr(int argc, char *argv[], SRVR_INIT_PARAM_Def &initParam, char* strName, char* strValue);
+long  getEpoch(zhandle_t *zh);
 
 //only support positive number
 BOOL getNumberTemp( char* strValue, int& nValue )
@@ -647,6 +653,10 @@ catch(SB_Fatal_Excep sbfe)
 		exit(1);
 	}
 
+        // get the current epoch from zookeeper and also put a watch on it
+        // (to be even safer, take epoch as a command line arg)
+        epoch = getEpoch(zh);
+
 //LCOV_EXCL_START
 // when a server dies, the MXOAS sends message to CFG. CFG creates the MXOSRVR process
 // and passess only one command line atribute: -SQL CLEANUP OBSOLETE VOLATILE TABLES
@@ -791,6 +801,11 @@ catch(SB_Fatal_Excep sbfe)
 //LCOV_EXCL_STOP
 		}
 	}
+
+    srvrGlobal->clientKeepaliveStatus = keepaliveStatus;
+    srvrGlobal->clientKeepaliveIntervaltime = keepaliveIntervaltime;
+    srvrGlobal->clientKeepaliveIdletime = keepaliveIdletime;
+    srvrGlobal->clientKeepaliveRetrycount = keepaliveRetrycount;
 
     // TCPADD and RZ are required parameters.
 	// The address is passed in with TCPADD parameter .
@@ -979,6 +994,18 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path, void *watche
             zh=0;
         }
     }
+
+    if (type == ZOO_CHANGED_EVENT) {
+      string masterNode(zkRootNode);
+
+      masterNode.append("/dcs/master");
+
+      if (masterNode.compare(path) == 0) {
+        if (getEpoch(zzh) != epoch) {
+          shutdownThisThing=1;
+        }
+      }
+    }
 }
 
 bool verifyPortAvailable(const char * idForPort,
@@ -1077,6 +1104,7 @@ BOOL getInitParamSrvr(int argc, char *argv[], SRVR_INIT_PARAM_Def &initParam, ch
 	memset(trafIPAddr,0,sizeof(trafIPAddr));
 	memset(hostname,0,sizeof(hostname));
 	aggrInterval = 60;
+    statisticsCacheSize = 60;
 	queryPubThreshold = 60;
 	statisticsPubType = STATISTICS_AGGREGATED;
 	bStatisticsEnabled = false;
@@ -1306,6 +1334,27 @@ BOOL getInitParamSrvr(int argc, char *argv[], SRVR_INIT_PARAM_Def &initParam, ch
 			}
 		}
 		else
+		if (strcmp(arg, "-STATISTICSCACHESIZE") == 0)
+		{
+			if (++count < argc )
+			{
+                            if(strspn(argv[count], "0123456789")==strlen(argv[count])){
+                                number=atoi(argv[count]);
+                                if(number > 0)
+                                    statisticsCacheSize = number;
+                            }
+                            else
+                            {
+                                argWrong = TRUE;
+                            }
+			}
+			else
+			{
+				argEmpty = TRUE;
+				break;
+			}
+		}
+               else
 		if (strcmp(arg, "-STATISTICSLIMIT") == 0)
 		{
 			if (++count < argc)
@@ -1427,10 +1476,102 @@ BOOL getInitParamSrvr(int argc, char *argv[], SRVR_INIT_PARAM_Def &initParam, ch
 				argEmpty = TRUE;
 				break;
 			}
-		}
+		}else
+        if (strcmp(arg, "-TCPKEEPALIVESTATUS") == 0){
+            if (++count < argc && argv[count][0] != '-')
+            {
+                char keepaliveEnable[20];
+                if (strlen(argv[count]) < sizeof(keepaliveEnable) - 1)
+                {
+                    memset(keepaliveEnable, 0, sizeof(keepaliveEnable) - 1);
+                    strncpy(keepaliveEnable, argv[count], sizeof(keepaliveEnable) - 1);
+                    if(stricmp(keepaliveEnable, "true") == 0)
+                        keepaliveStatus = true;
+                    else
+                        keepaliveStatus = false;
+                }
+                else
+                {
+                    argWrong = TRUE;
+                }
+            }
+            else
+            {
+                argEmpty = TRUE;
+                break;
+            }
+        }else
+        if (strcmp(arg, "-TCPKEEPALIVEIDLETIME") == 0){
+            if (++count < argc )
+            {
+                if(strspn(argv[count], "0123456789")==strlen(argv[count])){
+                    keepaliveIdletime = atoi(argv[count]);
+                }else
+                {
+                    argWrong = TRUE;
+                }
+			}
+            else
+            {
+                argEmpty = TRUE;
+                break;
+            }
+        }else
+        if (strcmp(arg, "-TCPKEEPALIVEINTERVAL") == 0){
+            if (++count < argc )
+            {
+                if(strspn(argv[count], "0123456789")==strlen(argv[count])){
+                    keepaliveIntervaltime = atoi(argv[count]);
+                }else
+                {
+                    argWrong = TRUE;
+                }
+            }
+            else
+            {
+                argEmpty = TRUE;
+                break;
+            }
+        }else
+        if (strcmp(arg, "-TCPKEEPALIVERETRYCOUNT") == 0){
+            if (++count < argc )
+            {
+                if(strspn(argv[count], "0123456789")==strlen(argv[count])){
+                    keepaliveRetrycount = atoi(argv[count]);
+                }else
+                {
+                    argWrong = TRUE;
+                }
+            }
+            else
+            {
+                argEmpty = TRUE;
+                break;
+            }
+        }
 		count++;
 	}
 
 }
 
+// The "epoch" is a time period between configuration changes in the
+// system. When such a configuration change happens (e.g. the
+// executable of the mxosrvr is replaced, or a system default is being
+// changed), we want to stop all existing mxosrvrs once they become
+// idle and replace them with new ones. Therefore, keep a watch on
+// this value and exit when it changes and when our state is or
+// becomes idle.
+long  getEpoch(zhandle_t *zh) {
+  char path[2000];
+  char zkData[1000];
+  int zkDataLen = sizeof(zkData);
+  int result = -1;
 
+  snprintf(path, sizeof(path), "%s/dcs/master", zkRootNode);
+  int rc = zoo_get(zh, path, 1, zkData, &zkDataLen, NULL);
+
+  if (rc == ZOK && zkDataLen > 0)
+    result = atol(zkData);
+
+  return result;
+}

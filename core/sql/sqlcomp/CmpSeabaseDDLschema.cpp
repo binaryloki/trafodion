@@ -371,9 +371,8 @@ ComObjectType objectType;
        output = "/* Hive DDL */";
        outlines.push_back(output.data());
 
-       output = "create database ";
+       output = "CREATE SCHEMA HIVE.";
        NAString lsch(schemaName);
-       lsch.toLower();
        output += lsch.data();
        output += ";";
 
@@ -383,7 +382,7 @@ ComObjectType objectType;
 
        if (isHiveRegistered)
          {
-           output = "REGISTER /*INTERNAL*/ HIVE SCHEMA hive.";
+           output = "REGISTER /*INTERNAL*/ HIVE SCHEMA HIVE.";
            output += lsch.data();
            output += ";";
            
@@ -419,7 +418,7 @@ Int64 schemaUID = getObjectTypeandOwner(&cliInterface,
 char username[MAX_USERNAME_LEN+1];
 Int32 lActualLen = 0;
 Int16 status = ComUser::getAuthNameFromAuthID(objectOwner,username, 
-                                              MAX_USERNAME_LEN,lActualLen);
+                                              MAX_USERNAME_LEN+1,lActualLen);
    if (status != FEOK)
    {
       *CmpCommon::diags() << DgSqlCode(-20235) // Error converting user ID.

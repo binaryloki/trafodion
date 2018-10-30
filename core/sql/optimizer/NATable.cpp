@@ -2299,10 +2299,10 @@ RangePartitionBoundaries * createRangePartitionBoundariesFromStats
          NAColumn* ncol = partColArray[c];
          const NAType* nt = ncol->getType();
          
-         if (rangePartBoundValues->getOperatorType() == ITM_ITEM_LIST ) 
-            val = (ItemExpr*) (*list) [c];
-          else
-            val = (ItemExpr*) (*list) [0];
+         val = (ItemExpr*) (*list) [c];
+
+         // make sure the value is the same type as the column
+         val = new(heap) Cast(val, nt->newCopy(heap));
 
          if (nt->isEncodingNeeded())
             encodeExpr = new(heap) CompEncode(val, !(partColArray.isAscending(c)));
@@ -2327,7 +2327,7 @@ RangePartitionBoundaries * createRangePartitionBoundariesFromStats
                                     (CmpCommon::diags()));
 
          totalEncodedKeyLength += encodedKeyLength;
-         totalEncodedKeyBuf += encodedKeyBuffer;
+         totalEncodedKeyBuf.append(encodedKeyBuffer, encodedKeyLength);
 
          if ( ok != 0 ) 
             return NULL;
@@ -4981,6 +4981,7 @@ NABoolean NATable::fetchObjectUIDForNativeTable(const CorrName& corrName,
      hiveTableId_(-1),
      tableDesc_(inTableDesc),
      privInfo_(NULL),
+     privDescs_(NULL),
      secKeySet_(heap),
      newColumns_(heap),
      snapshotName_(NULL),
@@ -5081,7 +5082,6 @@ NABoolean NATable::fetchObjectUIDForNativeTable(const CorrName& corrName,
        setHbaseDataFormatString(TRUE);
        break;
      }
-
    if (table_desc->tableDesc()->isInMemoryObject())
      {
        setInMemoryObjectDefn( TRUE );
@@ -5094,7 +5094,7 @@ NABoolean NATable::fetchObjectUIDForNativeTable(const CorrName& corrName,
 
    if (corrName.isExternal())
      {
-       setIsExternalTable(TRUE);
+       setIsTrafExternalTable(TRUE);
      }
 
    if (qualifiedName_.getQualifiedNameObj().isHistograms() || 
@@ -5147,10 +5147,10 @@ NABoolean NATable::fetchObjectUIDForNativeTable(const CorrName& corrName,
    if ((table_desc->tableDesc()->objectFlags & SEABASE_OBJECT_IS_EXTERNAL_HIVE) != 0 ||
        (table_desc->tableDesc()->objectFlags & SEABASE_OBJECT_IS_EXTERNAL_HBASE) != 0)
      {
-       setIsExternalTable(TRUE);
+       setIsTrafExternalTable(TRUE);
 
        if (table_desc->tableDesc()->objectFlags & SEABASE_OBJECT_IS_IMPLICIT_EXTERNAL)
-         setIsImplicitExternalTable(TRUE);
+         setIsImplicitTrafExternalTable(TRUE);
      }
 
    if (CmpSeabaseDDL::isMDflagsSet
@@ -5714,6 +5714,7 @@ NATable::NATable(BindWA *bindWA,
        tableDesc_(NULL),
        secKeySet_(heap),
        privInfo_(NULL),
+       privDescs_(NULL),
        newColumns_(heap),
        snapshotName_(NULL),
        allColFams_(heap)
@@ -5841,6 +5842,12 @@ NATable::NATable(BindWA *bindWA,
       viewExpandedText = replaceAll(viewExpandedText, "`", "");
       
       NAString createViewStmt("CREATE VIEW ");
+      createViewStmt += NAString("hive.");
+      if (strcmp(htbl->schName_, "default") == 0)
+        createViewStmt += "hive";
+      else
+        createViewStmt += htbl->schName_;
+      createViewStmt += ".";
       createViewStmt += htbl->tblName_ + NAString(" AS ") +
         viewExpandedText + NAString(";");
       
@@ -5862,6 +5869,11 @@ NATable::NATable(BindWA *bindWA,
     }
   else
     {
+      if (htbl->isExternalTable())
+        setIsHiveExternalTable(TRUE);
+      else if (htbl->isManagedTable())
+        setIsHiveManagedTable(TRUE);
+      
       if (createNAFileSets(htbl             /*IN*/,
                            this             /*IN*/,
                            colArray_        /*IN*/,
@@ -6771,20 +6783,23 @@ void NATable::getPrivileges(TrafDesc * priv_desc)
 
   // If current user is root, object owner, or this is a volatile table
   // automatically have owner default privileges.
- if ((!isSeabaseTable() && !isHiveTable()) ||
-       !CmpCommon::context()->isAuthorizationEnabled() ||
-       isVolatileTable() ||
-       (ComUser::isRootUserID() && !isHiveTable()) )
+ if (!CmpCommon::context()->isAuthorizationEnabled() ||
+      isVolatileTable() ||
+      (ComUser::isRootUserID() && 
+        (!isHiveTable() && !isHbaseCellTable() && 
+         !isHbaseRowTable() && !isHbaseMapTable()) ))
   {
     privInfo_ = new(heap_) PrivMgrUserPrivs;
     privInfo_->setOwnerDefaultPrivs();
     return;
   }
 
+  Int32 currentUser (ComUser::getCurrentUser());
+
   // Generally, if the current user is the object owner, then the automatically
   // have all privs.  However, if this is a shared schema then views can be
   // owned by the current user but not have all privs
-  if (ComUser::getCurrentUser() == owner_ && objectType_ != COM_VIEW_OBJECT)
+  if (currentUser == owner_ && objectType_ != COM_VIEW_OBJECT)
   {
     privInfo_ = new(heap_) PrivMgrUserPrivs;
     privInfo_->setOwnerDefaultPrivs();
@@ -6794,45 +6809,94 @@ void NATable::getPrivileges(TrafDesc * priv_desc)
   ComSecurityKeySet secKeyVec(heap_);
   if (priv_desc == NULL)
   {
-    if (isHiveTable())
+    if (!isSeabaseTable())
       readPrivileges();
     else
+    {
       privInfo_ = NULL;
-    return;
+      return;
+    }
   }
   else
   {
     // get roles granted to current user 
-    // SQL_EXEC_GetRoleList returns the list of roles from the CliContext
-    std::vector<int32_t> myRoles;
-    Int32 numRoles = 0;
-    Int32 *roleIDs = NULL;
-    if (SQL_EXEC_GetRoleList(numRoles, roleIDs) < 0)
-    {
-      *CmpCommon::diags() << DgSqlCode(-1034);
+    NAList <Int32> roleIDs(heap_);
+    if (ComUser::getCurrentUserRoles(roleIDs) != 0)
       return;
-    }
+
+    Int32 numRoles = roleIDs.entries();
 
     // At this time we should have at least one entry in roleIDs (PUBLIC_USER)
-    CMPASSERT (roleIDs && numRoles > 0);
+    CMPASSERT (numRoles > 0);
 
-    for (Int32 i = 0; i < numRoles; i++)
-      myRoles.push_back(roleIDs[i]);
+    // (PrivMgrUserPrivs)  privInfo_ are privs for the current user
+    // (PrivMgrDescList)   privDescs_ are all privs for the object
+    // (TrafPrivDesc)      priv_desc are all object privs in TrafDesc form
+    //                     created by CmpSeabaseDDL::getSeabasePrivInfo
+    //                     before the NATable entry is constructed
+    // (ComSecurityKeySet) secKeySet_ are the qi keys for the current user
 
-    // Build privInfo_ based on the priv_desc
-    privInfo_ = new(heap_) PrivMgrUserPrivs;
-    privInfo_->initUserPrivs(myRoles, priv_desc, 
-                             ComUser::getCurrentUser(), 
-                             objectUID_.get_value(), secKeySet_);
-  }
-
-
-  if (privInfo_ == NULL)
+    // Convert priv_desc into a list of PrivMgrDesc (privDescs_)
+    privDescs_ = new (heap_) PrivMgrDescList(heap_); //initialize empty list
+    TrafDesc *priv_grantees_desc = priv_desc->privDesc()->privGrantees;
+    while (priv_grantees_desc)
     {
-      *CmpCommon::diags() << DgSqlCode(-1034);
-      return;
+      PrivMgrDesc *privs = new (heap_) PrivMgrDesc(priv_grantees_desc->privGranteeDesc()->grantee);
+      TrafDesc *objectPrivs = priv_grantees_desc->privGranteeDesc()->objectBitmap;
+      PrivMgrCoreDesc objectDesc(objectPrivs->privBitmapDesc()->privBitmap,
+                                 objectPrivs->privBitmapDesc()->privWGOBitmap);
+
+      TrafDesc *priv_grantee_desc = priv_grantees_desc->privGranteeDesc();
+      TrafDesc *columnPrivs = priv_grantee_desc->privGranteeDesc()->columnBitmaps;
+      NAList<PrivMgrCoreDesc> columnDescs(heap_);
+      while (columnPrivs)
+      {
+        PrivMgrCoreDesc columnDesc(columnPrivs->privBitmapDesc()->privBitmap,
+                                   columnPrivs->privBitmapDesc()->privWGOBitmap,
+                                   columnPrivs->privBitmapDesc()->columnOrdinal);
+        columnDescs.insert(columnDesc);
+        columnPrivs = columnPrivs->next;
+      }
+
+      privs->setTablePrivs(objectDesc);
+      privs->setColumnPrivs(columnDescs);
+
+      privs->setHasPublicPriv(ComUser::isPublicUserID(privs->getGrantee()));
+
+      privDescs_->insert(privs);
+      priv_grantees_desc = priv_grantees_desc->next;
     }
 
+    // Generate privInfo_ and secKeySet_ for current user from privDescs_
+    privInfo_ = new(heap_) PrivMgrUserPrivs;
+    privInfo_->initUserPrivs(roleIDs,
+                             privDescs_,
+                             currentUser,
+                             objectUID_.get_value(),
+                             &secKeySet_);
+
+    if (privInfo_ == NULL)
+    {
+      if (!CmpCommon::diags()->containsError(-1034))
+        *CmpCommon::diags() << DgSqlCode(-1034);
+      return;
+    }
+  }
+
+  // log privileges enabled for table
+  Int32 len = 500;
+  char msg[len];
+  std::string privDetails = privInfo_->print();
+  snprintf(msg, len, "NATable::getPrivileges (list of all privileges on object), user: %s obj %s, %s",
+          ComUser::getCurrentUsername(),
+          qualifiedName_.getExtendedQualifiedNameAsString().data(),
+          privDetails.c_str());
+  QRLogger::log(CAT_SQL_EXE, LL_DEBUG, "%s", msg);
+  if (getenv("DBUSER_DEBUG"))
+  {
+    printf("[DBUSER:%d] %s\n", (int) getpid(), msg);
+    fflush(stdout);
+  }
 }
 
 // Call privilege manager to get privileges and security keys
@@ -6867,8 +6931,10 @@ void NATable::readPrivileges ()
   std::vector <ComSecurityKey *> secKeyVec;
 
   if (testError || (STATUS_GOOD !=
-                    privInterface.getPrivileges((NATable *)this,
-                                                ComUser::getCurrentUser(), *privInfo_, &secKeyVec)))
+    privInterface.getPrivileges((NATable *)this,
+                                 ComUser::getCurrentUser(),
+                                 *privInfo_, &secKeySet_)))
+
     {
       if (testError)
 #ifndef NDEBUG
@@ -6920,7 +6986,9 @@ bool NATable::isEnabledForDDLQI() const
 {
   if (isSeabaseMD_ || isSMDTable_ || (getSpecialType() == ExtendedQualName::VIRTUAL_TABLE))
     return false;
-  else 
+  else if (isHiveTable() && (objectUID_.get_value() == 0))
+    return false;
+  else
     {
       if (objectUID_.get_value() == 0)
         {
@@ -7711,6 +7779,11 @@ NABoolean NATable::hasSaltedColumn(Lng32 * saltColPos)
   return FALSE;
 }
 
+const NABoolean NATable::hasSaltedColumn(Lng32 * saltColPos) const
+{
+  return ((NATable*)this)->hasSaltedColumn(saltColPos);
+}
+
 NABoolean NATable::hasDivisioningColumn(Lng32 * divColPos)
 {
   for (CollIndex i=0; i<colArray_.entries(); i++ )
@@ -8321,7 +8394,7 @@ NATable * NATableDB::get(CorrName& corrName, BindWA * bindWA,
       if (isHbaseMap)
         {
           table->setIsHbaseMapTable(TRUE);
-          table->setIsExternalTable(TRUE);
+          table->setIsTrafExternalTable(TRUE);
         }
     }
     else if (isHiveTable(corrName) &&
@@ -8490,7 +8563,8 @@ NATable * NATableDB::get(CorrName& corrName, BindWA * bindWA,
                      {
                        *CmpCommon::diags()
                          << DgSqlCode(-1388)
-                         << DgTableName(corrName.getExposedNameAsAnsiString());
+                         << DgString0("Object")
+                         << DgString1(corrName.getExposedNameAsAnsiString());
                      }
                  }
                else
@@ -9149,6 +9223,8 @@ NATableDB::free_entries_with_QI_key(Int32 numKeys, SQL_QIKEY* qiKeyArray)
     NABoolean toRemove = FALSE;
     if ((currTable->isSeabaseTable()) ||
         (currTable->isHiveTable()) ||
+        (currTable->isHbaseCellTable()) ||
+        (currTable->isHbaseRowTable()) ||
         (currTable->hasExternalTable()))
       toRemove = TRUE;
     if (! toRemove)

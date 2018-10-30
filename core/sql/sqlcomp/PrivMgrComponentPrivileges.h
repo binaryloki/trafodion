@@ -48,6 +48,8 @@ public:
 // -------------------------------------------------------------------
 // Constructors and destructors:
 // -------------------------------------------------------------------
+   PrivMgrComponentPrivileges();
+
    PrivMgrComponentPrivileges( 
       const std::string & metadataLocation,
       ComDiagsArea * pDiags = NULL);
@@ -80,14 +82,16 @@ public:
       const std::string & componentName,
       const std::string & operationName);
       
-   int64_t getCount();
+   int64_t getCount( const int32_t componentUID = INVALID_COMPONENT_UID );
      
-   void getSQLDMLPrivileges(
+   void getSQLCompPrivs(
       const int32_t                granteeID,
       const std::vector<int32_t> & roleIDs,
-      PrivObjectBitmap           & DMLBitmap,
-      bool                       & hasManagePrivileges);
-      
+      PrivObjectBitmap           & DMLPrivs,
+      bool                       & hasManagePrivPriv,
+      bool                       & hasSelectMetadata,
+      bool                       & hasAnyManagePriv);
+
    PrivStatus grantPrivilege(
       const std::string & componentName,
       const std::vector<std::string> & operations,
@@ -140,8 +144,6 @@ public:
       PrivDropBehavior dropBehavior); 
      
 private: 
-   PrivMgrComponentPrivileges();
-
    bool grantExists(
       const std::string componentUIDString,
       const std::string operationCode,

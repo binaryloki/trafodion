@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.FileNotFoundException;
 import java.io.EOFException;
 import java.io.OutputStream;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +39,12 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.io.compress.CompressionInputStream;
+import org.apache.hadoop.io.SequenceFile;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.Writable;
+
 import java.io.EOFException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
@@ -53,31 +60,49 @@ import org.apache.hadoop.io.compress.Compressor;
 import org.apache.hadoop.io.compress.GzipCodec;
 import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.io.compress.CompressionCodecFactory;
 
 //
 //  To read a range in a Hdfs file, use the constructor
-//   public HDFSClient(int bufNo, int rangeNo, String filename, ByteBuffer buffer, long position, int length) throws IOException
+//   public HDFSClient(int bufNo, int rangeNo, String filename, ByteBuffer buffer, long position, int length, CompressionInputStream inStream) 
 // 
 //  For instance methods like hdfsListDirectory use the constructor
 //     public HDFSClient()
 //
 //  For all static methods use
-//     HdfsClient::<static_method_name>
+//     HDFSClient::<static_method_name>
 //
 
 public class HDFSClient 
 {
+   // Keep the constants and string array below in sync with 
+   // enum CompressionMethod at sql/comexe/ComCompressionInfo.h
+   static final short UNKNOWN_COMPRESSION = 0;
+   static final short UNCOMPRESSED = 1;
+   static final short LZOP = 5;
+   static final String COMPRESSION_TYPE[] = {
+      "UNKNOWN_COMPRESSION", // unable to determine compression method
+      "UNCOMPRESSED",            // file is not compressed
+      "LZO_DEFLATE",             // using LZO deflate compression
+      "DEFLATE",                 // using DEFLATE compression
+      "GZIP",                    // using GZIP compression
+      "LZOP"};                   // using LZOP compression
    static Logger logger_ = Logger.getLogger(HDFSClient.class.getName());
    private static Configuration config_ = null;
    private static ExecutorService executorService_ = null;
    private static FileSystem defaultFs_ = null;
+   private static CompressionCodecFactory codecFactory_ = null;
+   private static boolean alluxioNotInstalled_ = false;
    private FileSystem fs_ = null;
    private int bufNo_;
    private int rangeNo_;
-   private FSDataInputStream fsdis_; 
+   private FSDataInputStream fsdis_;
+           CompressionInputStream inStream_; 
    private OutputStream outStream_;
    private String filename_;
    private ByteBuffer buf_;
+   private ByteBuffer savedBuf_;
+   private byte[] bufArray_;
    private int bufLen_;
    private int bufOffset_ = 0;
    private long pos_ = 0;
@@ -89,7 +114,18 @@ public class HDFSClient
    private int isEOF_ = 0; 
    private int totalBytesWritten_ = 0;
    private Path filepath_ = null;
-   private boolean compression_;
+   boolean compressed_ = false;
+   private CompressionCodec codec_ = null;
+   private short compressionType_;
+   private int ioByteArraySizeInKB_;
+
+   private boolean sequenceFile_;
+   private byte recDelimiter_;
+   private Writable key_;
+   private Writable value_;
+   private SequenceFile.Reader reader_;
+   private SequenceFile.CompressionType seqCompressionType_;
+
    static {
       String confFile = System.getProperty("trafodion.log4j.configFile");
       System.setProperty("trafodion.root", System.getenv("TRAF_HOME"));
@@ -105,6 +141,17 @@ public class HDFSClient
       catch (IOException ioe) {
          throw new RuntimeException("Exception in HDFSClient static block", ioe);
       }
+      try {
+         boolean alluxioFs = defaultFs_ instanceof alluxio.hadoop.FileSystem;
+      }
+      catch (Throwable rte)
+      {
+         // Ignore the exception. It is not needed for alluxio to be installed
+         // for the methods of this class to work if 
+         // alluxio filesystem is NOT required
+         alluxioNotInstalled_ = true;
+      }
+      codecFactory_ = new CompressionCodecFactory(config_); 
       System.loadLibrary("executor");
    }
 
@@ -120,25 +167,48 @@ public class HDFSClient
       HDFSRead() 
       {
       }
- 
+    
       public Object call() throws IOException 
       {
          int bytesRead;
          int totalBytesRead = 0;
-         if (! buf_.hasArray()) {
-            try {
-              fsdis_.seek(pos_);
-            } catch (EOFException e) {
-              isEOF_ = 1;
-              return new Integer(totalBytesRead);
-            } 
+         if (sequenceFile_) {
+            // do nothing
+            ; 
+         } else if (compressed_) {
+            bufArray_ = new byte[ioByteArraySizeInKB_ * 1024];
+         } 
+         else  {
+            // alluxio doesn't support direct ByteBuffer reads
+            // Hence, create a non-direct ByteBuffer, read into
+            // byteArray backing up this ByteBuffer and 
+            // then copy the data read to direct ByteBuffer for the 
+            // native layer to process the data
+            if ((! alluxioNotInstalled_) && fs_ instanceof alluxio.hadoop.FileSystem) {
+               savedBuf_ = buf_;
+               buf_ = ByteBuffer.allocate(savedBuf_.capacity());
+            }
+            if (! buf_.hasArray()) {
+               try {
+                  fsdis_.seek(pos_);
+               } catch (EOFException e) {
+                  isEOF_ = 1;
+                  return new Integer(totalBytesRead);
+               } 
+            }
          }
          do
          {
-            if (buf_.hasArray())
-               bytesRead = fsdis_.read(pos_, buf_.array(), bufOffset_, lenRemain_);
-            else 
-               bytesRead = fsdis_.read(buf_);
+            if (sequenceFile_) 
+               bytesRead = sequenceFileRead(lenRemain_);
+            else if (compressed_) 
+               bytesRead = compressedFileRead(lenRemain_);
+            else {
+               if (buf_.hasArray())
+                  bytesRead = fsdis_.read(pos_, buf_.array(), bufOffset_, lenRemain_);
+               else 
+                  bytesRead = fsdis_.read(buf_);
+            }
             if (bytesRead == -1) {
                isEOF_ = 1;
                break;
@@ -151,10 +221,94 @@ public class HDFSClient
             bufOffset_ += bytesRead;
             pos_ += bytesRead;
             lenRemain_ -= bytesRead;
-         } while (lenRemain_ > 0);
+         } while (lenRemain_ > 0); 
+         if ((! alluxioNotInstalled_) && fs_ instanceof alluxio.hadoop.FileSystem) {
+            if (totalBytesRead > 0) {
+               byte[] temp = buf_.array();
+               savedBuf_.put(temp, 0, totalBytesRead);
+            }
+         }
          return new Integer(totalBytesRead);
       }
-   }
+    } 
+
+    int compressedFileRead(int readLenRemain) throws IOException 
+    {
+       int totalReadLen = 0;
+       int readLen;
+       int offset = 0;
+       int retcode;
+
+         int lenRemain = ((readLenRemain > bufArray_.length) ? bufArray_.length : readLenRemain);
+         do 
+         {
+            readLen = inStream_.read(bufArray_, offset, lenRemain);
+            if (readLen == -1 || readLen == 0)
+               break;
+            totalReadLen += readLen;
+            offset  += readLen;
+            lenRemain -= readLen;
+         } while (lenRemain > 0);
+         if (totalReadLen > 0) {
+            if ((retcode = copyToByteBuffer(buf_, bufOffset_, bufArray_, totalReadLen)) != 0)
+               throw new IOException("Failure to copy to the DirectByteBuffer in the native layer with error code " + retcode);
+         }
+         else
+            totalReadLen = -1;
+         return totalReadLen; 
+    } 
+
+    /* Trafodion adds record delimiter '\n' while copying it
+       to buffer backing up the ByteBuffer */
+
+    int sequenceFileRead(int readLenRemain) throws IOException 
+    {
+       boolean eof = false;
+       boolean nextValue;
+       byte[] byteArray;
+       int readLen;
+       int totalReadLen = 0;
+       long tempPos;
+       int lenRemain = readLenRemain;
+
+       while (!eof && lenRemain > 0) {
+          try {
+            tempPos = reader_.getPosition();
+            nextValue = reader_.next(key_, value_);
+            if (!nextValue) {
+               eof = true;
+               break;
+            }
+          }
+          catch (java.io.EOFException e)
+          {
+              eof = true;
+              break;
+          }
+          byteArray = ((Text)value_).getBytes();
+          readLen = ((Text)value_).getLength();
+          if ((readLen+1) <= lenRemain) {
+                            
+              buf_.put(byteArray, 0, readLen);
+              buf_.put(recDelimiter_);
+              lenRemain -= (readLen+1);
+              totalReadLen += (readLen+1);
+          } else {
+              // Reset the position because the row can't be copied to buffer
+              try {
+                reader_.sync(tempPos); 
+              }
+              catch (java.io.EOFException e1)
+              {}
+              break;       
+          }   
+       }
+       if (totalReadLen == 0)
+          totalReadLen = -1;  
+       return totalReadLen;
+    } 
+
+   native int copyToByteBuffer(ByteBuffer buf, int bufOffset, byte[] bufArray, int copyLen);
        
    public HDFSClient() 
    {
@@ -166,14 +320,39 @@ public class HDFSClient
    // The passed in length can never be more than the size of the buffer
    // If the range has a length more than the buffer length, the range is chunked
    // in HdfsScan
-   public HDFSClient(int bufNo, int rangeNo, String filename, ByteBuffer buffer, long position, int length) throws IOException
+   public HDFSClient(int bufNo, int ioByteArraySizeInKB, int rangeNo, String filename, ByteBuffer buffer, long position, 
+                int length, short compressionType, boolean sequenceFile, byte recDelimiter, CompressionInputStream inStream) 
+                throws IOException, EOFException
    {
       bufNo_ = bufNo; 
       rangeNo_ = rangeNo;
       filename_ = filename;
+      ioByteArraySizeInKB_ = ioByteArraySizeInKB;
       filepath_ = new Path(filename_);
       fs_ = FileSystem.get(filepath_.toUri(),config_);
-      fsdis_ = fs_.open(filepath_);
+      compressionType_ = compressionType;
+      inStream_ = inStream;
+      sequenceFile_ = sequenceFile;
+      recDelimiter_ = recDelimiter;
+      if (sequenceFile_) {
+         fsdis_ = null;
+         inStream_ = null;
+      } 
+      else {
+         codec_ = codecFactory_.getCodec(filepath_);
+         if (codec_ != null) {
+            compressed_ = true;
+            if (inStream_ == null)
+               inStream_ = codec_.createInputStream(fs_.open(filepath_));
+         }
+         else {
+           if ((compressionType_ != UNCOMPRESSED) && (compressionType_ != UNKNOWN_COMPRESSION))
+              throw new IOException(COMPRESSION_TYPE[compressionType_] + " compression codec is not configured in Hadoop");
+           if (filename_.endsWith(".lzo"))
+              throw new IOException(COMPRESSION_TYPE[LZOP] + " compression codec is not configured in Hadoop");
+           fsdis_ = fs_.open(filepath_);
+         }
+      }
       blockSize_ = (int)fs_.getDefaultBlockSize(filepath_);
       buf_  = buffer;
       bufOffset_ = 0;
@@ -187,8 +366,42 @@ public class HDFSClient
       }
       lenRemain_ = (len_ > bufLen_) ? bufLen_ : len_;
       if (lenRemain_ != 0) {
+         if (sequenceFile_) 
+            initSequenceFileRead();
          future_ = executorService_.submit(new HDFSRead());
       }
+   }
+
+   /* Trafodion support Sequence file with keys written via ByteWritble or Text class
+      and value written via Text class. However, the key is completely ignored
+      while reading the rows. The columns in the value is delimited by column delimiter 001(octal).
+   */ 
+
+   public void initSequenceFileRead() throws IOException, EOFException
+   {
+      SequenceFile.Reader.Option seqLen = SequenceFile.Reader.length(lenRemain_);
+      SequenceFile.Reader.Option seqFileName = SequenceFile.Reader.file(filepath_);
+      reader_ = new SequenceFile.Reader(config_, seqLen, seqFileName);
+      seqCompressionType_ = reader_.getCompressionType();
+      if (seqCompressionType_ == SequenceFile.CompressionType.NONE)
+         compressed_ = false;
+      else
+         compressed_ = true;
+      if (compressed_ && pos_ != 0)
+         throw new IOException("Spliting of compressed sequence file is not supported");
+      try {
+        reader_.sync(pos_);
+      } catch (EOFException e)
+      {}
+      
+      String keyClass = reader_.getKeyClassName(); 
+      String valueClass = reader_.getValueClassName();
+      if (! valueClass.equals("org.apache.hadoop.io.Text")) 
+         throw new IOException("Sequence File with the value class of type " + valueClass +  " is not supported");
+      if (!(keyClass.equals("org.apache.hadoop.io.Text") || keyClass.equals("org.apache.hadoop.io.BytesWritable")))
+         throw new IOException("Sequence File with the key class of type " + keyClass + " is not supported");
+      key_ = (Writable) ReflectionUtils.newInstance(reader_.getKeyClass(), config_);
+      value_ = (Writable) ReflectionUtils.newInstance(reader_.getValueClass(), config_);
    }
 
   //  This method waits for the read to complete. Read can complete due to one of the following
@@ -201,7 +414,8 @@ public class HDFSClient
       int bytesRead;
       retObject = (Integer)future_.get();
       bytesRead = retObject.intValue();
-      fsdis_.close();
+      if (! compressed_ && fsdis_ != null)
+         fsdis_.close();
       fsdis_ = null;
       return bytesRead;
    }  
@@ -216,8 +430,10 @@ public class HDFSClient
       return isEOF_;
    }
 
-   boolean hdfsCreate(String fname , boolean overwrite, boolean compress) throws IOException
+   boolean hdfsCreate(String fname , boolean overwrite, boolean append, boolean compress) throws IOException
    {
+      boolean fileExists = false;      
+      filename_ = fname;
       if (logger_.isDebugEnabled()) 
         logger_.debug("HDFSClient.hdfsCreate() - started" );
       if (!compress || (compress && fname.endsWith(".gz")))
@@ -226,29 +442,28 @@ public class HDFSClient
         filepath_ = new Path(fname + ".gz");
         
       fs_ = FileSystem.get(filepath_.toUri(),config_);
-      compression_ = compress;
+      compressed_ = compress;
       fsdis_ = null;      
-      FSDataOutputStream fsOut;
-      if (overwrite)
-         fsOut = fs_.create(filepath_);
-      else
       if (fs_.exists(filepath_))
-         fsOut = fs_.append(filepath_);
-      else
-         fsOut = fs_.create(filepath_);
-
-      if (compression_) {
-          GzipCodec gzipCodec = (GzipCodec) ReflectionUtils.newInstance( GzipCodec.class, config_);
-          Compressor gzipCompressor = CodecPool.getCompressor(gzipCodec);
-          outStream_= gzipCodec.createOutputStream(fsOut, gzipCompressor);
+      {
+         if (overwrite)
+            fs_.delete(filepath_);
+         else if (!append)
+            throw new IOException(filepath_ + " already exists");
+         else
+            fileExists = true;
       }
-      else
-         outStream_ = fsOut;
+      FSDataOutputStream fsOut = null;
+      if (!fileExists) {
+         fsOut = fs_.create(filepath_);
+         fsOut.close();
+      }
       return true;
-   }
+   } 
 
    boolean hdfsOpen(String fname , boolean compress) throws IOException
    {
+      filename_ = fname;
       if (logger_.isDebugEnabled()) 
          logger_.debug("HDFSClient.hdfsOpen() - started" );
       if (!compress || (compress && fname.endsWith(".gz")))
@@ -256,10 +471,47 @@ public class HDFSClient
       else
         filepath_ = new Path(fname + ".gz");
       fs_ = FileSystem.get(filepath_.toUri(),config_);
-      compression_ = compress;  
+      compressed_ = compress;  
       outStream_ = null;
       fsdis_ = null;      
       return true;
+    }
+
+    long hdfsSize() throws IOException
+    {
+       FileStatus filestatus;
+       try 
+       {
+          filestatus = fs_.getFileStatus(filepath_);
+       } catch (java.io.FileNotFoundException e)
+       {
+          return 0;
+       }
+       if (filestatus.isFile())
+          return filestatus.getLen();
+       else
+          return -1;
+    }
+
+    long hdfsWriteImmediate(byte[] buff) throws IOException
+    {
+      if (logger_.isDebugEnabled()) 
+         logger_.debug("HDFSClient.hdfsWriteClose() - started" );
+      FSDataOutputStream fsOut;
+      FileStatus filestatus;
+      long writeOffset; 
+      if (fs_.exists(filepath_)) {
+         filestatus = fs_.getFileStatus(filepath_);
+         fsOut = fs_.append(filepath_);
+         writeOffset = filestatus.getLen(); 
+      }
+      else {
+         fsOut = fs_.create(filepath_);
+         writeOffset = 0;
+      }
+      fsOut.write(buff);
+      fsOut.close();
+      return writeOffset;
     }
     
     int hdfsWrite(byte[] buff) throws IOException
@@ -274,7 +526,7 @@ public class HDFSClient
          else
             fsOut = fs_.create(filepath_);
       
-         if (compression_) {
+         if (compressed_) {
             GzipCodec gzipCodec = (GzipCodec) ReflectionUtils.newInstance( GzipCodec.class, config_);
             Compressor gzipCompressor = CodecPool.getCompressor(gzipCodec);
             outStream_= gzipCodec.createOutputStream(fsOut, gzipCompressor);
@@ -286,38 +538,64 @@ public class HDFSClient
       }
       outStream_.write(buff);
       if (outStream_ instanceof FSDataOutputStream)
-         totalBytesWritten_ = ((FSDataOutputStream)outStream_).size();
-      else
-         totalBytesWritten_ += buff.length; 
+         ((FSDataOutputStream)outStream_).hsync();
       if (logger_.isDebugEnabled()) 
-         logger_.debug("HDFSClient.hdfsWrite() - bytes written " + totalBytesWritten_ );
-      return totalBytesWritten_;
+         logger_.debug("HDFSClient.hdfsWrite() - bytes written " + buff.length);
+      return buff.length;
     }
 
-    int hdfsRead(ByteBuffer buffer) throws IOException
+    int hdfsRead(long pos, ByteBuffer buffer) throws IOException
     {
       if (logger_.isDebugEnabled()) 
          logger_.debug("HDFSClient.hdfsRead() - started" );
-      if (fsdis_ == null) {
-         fsdis_ = fs_.open(filepath_);
-         pos_ = 0;
+      if (fsdis_ == null && inStream_ == null ) {
+         try {
+         codec_ = codecFactory_.getCodec(filepath_);
+         if (codec_ != null) {
+            compressed_ = true;
+            inStream_ = codec_.createInputStream(fs_.open(filepath_));
+         }
+         else
+            fsdis_ = fs_.open(filepath_);
+         } catch (java.io.FileNotFoundException e) {
+            return 0;
+         }
       }
       int lenRemain;   
       int bytesRead;
       int totalBytesRead = 0;
       int bufLen;
       int bufOffset = 0;
+      if (compressed_) {
+         if (pos != 0 && pos != -1)
+            throw new IOException("Compressed files can be read from a non-zero position");
+         else
+            pos_ = 0;
+      }
+      else
+      if (pos != -1) 
+         pos_ = pos;
+      if (compressed_ && bufArray_ != null) 
+         bufArray_ = new byte[ioByteArraySizeInKB_ * 1024];
       if (buffer.hasArray())
          bufLen = buffer.array().length;
       else
+      {
+         if (pos_ != -1)
+            fsdis_.seek(pos_);
          bufLen = buffer.capacity();
+      }
       lenRemain = bufLen;
       do
       {
-         if (buffer.hasArray())
-            bytesRead = fsdis_.read(pos_, buffer.array(), bufOffset, lenRemain);
-         else
-            bytesRead = fsdis_.read(buffer);    
+         if (compressed_) {
+            bytesRead = compressedFileRead(lenRemain);
+         } else {
+           if (buffer.hasArray()) 
+              bytesRead = fsdis_.read(pos_, buffer.array(), bufOffset, lenRemain);
+           else
+              bytesRead = fsdis_.read(buffer);    
+         }
          if (bytesRead == -1 || bytesRead == 0)
             break;    
          totalBytesRead += bytesRead;
@@ -331,7 +609,6 @@ public class HDFSClient
     {
       if (logger_.isDebugEnabled()) logger_.debug("HDFSClient.hdfsClose() - started" );
       if (outStream_ != null) {
-          outStream_.flush();
           outStream_.close();
           outStream_ = null;
       }
@@ -340,7 +617,24 @@ public class HDFSClient
       return true;
     }
 
-    
+    static long hdfsSize(String filename) throws IOException
+    {
+       Path filepath = new Path(filename);
+       FileSystem fs = FileSystem.get(filepath.toUri(),config_);
+       FileStatus filestatus;
+       try
+       {
+          filestatus = fs.getFileStatus(filepath);
+       } catch (java.io.FileNotFoundException e)
+       {
+          return 0;
+       } 
+       if (filestatus.isFile())
+          return filestatus.getLen();
+       else
+          return -1;
+    } 
+
     public static boolean hdfsMergeFiles(String srcPathStr, String dstPathStr) throws IOException
     {
       if (logger_.isDebugEnabled()) logger_.debug("HDFSClient.hdfsMergeFiles() - start");
@@ -427,6 +721,34 @@ public class HDFSClient
       return true;
    }
 
+   public static boolean hdfsDeleteFiles(String dirPathStr, String startingFileName) throws IOException
+   {
+      if (logger_.isDebugEnabled()) 
+         logger_.debug("HDFSClient.hdfsDeleteFiles(" + dirPathStr + ", " + startingFileName +")");
+
+      Path dirPath = new Path(dirPathStr );
+      FileSystem fs = FileSystem.get(dirPath.toUri(), config_);
+      FileStatus[] fileStatus;
+      if (fs.isDirectory(dirPath))
+         fileStatus = fs.listStatus(dirPath);
+      else
+         throw new IOException("The path " + dirPath + " is not a directory");
+      FileStatus aFileStatus; 
+      if (fileStatus != null) {
+         for (int i = 0; i < fileStatus.length; i++)
+         {
+             aFileStatus = fileStatus[i];
+             if (! aFileStatus.isDirectory()) {
+                String pathName =  aFileStatus.getPath().toString();
+                String filenameParts[] = pathName.split(dirPathStr);
+                if (filenameParts.length == 2 && filenameParts[1].startsWith(startingFileName))
+                   fs.delete(aFileStatus.getPath());
+             }
+         }
+      }
+      return true;
+   }
+
    public int hdfsListDirectory(String pathStr, long hdfsClientJniObj) throws IOException
    {
       if (logger_.isDebugEnabled()) 
@@ -465,12 +787,12 @@ public class HDFSClient
          return 0;
    }
 
-
+   
    public void stop() throws IOException
    {
       if (future_ != null) {
          try {
-           future_.get(200, TimeUnit.MILLISECONDS);
+           future_.get(30, TimeUnit.SECONDS);
          } catch(TimeoutException e) {
             logger_.error("Asynchronous Thread of HdfsScan is Cancelled (timeout), ", e);
             future_.cancel(true);
@@ -584,6 +906,17 @@ public class HDFSClient
       Path dirPath = new Path(pathStr );
       FileSystem fs = FileSystem.get(dirPath.toUri(), config_);
       fs.mkdirs(dirPath);
+      return true;
+   }
+
+   public static boolean hdfsRename(String fromPathStr, String toPathStr) throws IOException 
+   {
+      if (logger_.isDebugEnabled()) 
+         logger_.debug("HDFSClient.hdfsRename(" + fromPathStr + ", " + toPathStr + ")");
+      Path fromPath = new Path(fromPathStr );
+      Path toPath = new Path(toPathStr );
+      FileSystem fs = FileSystem.get(fromPath.toUri(), config_);
+      fs.rename(fromPath, toPath);
       return true;
    }
 

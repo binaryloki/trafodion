@@ -58,7 +58,7 @@ enum CatErrorCode { CAT_FIRST_ERROR = 1000
                   // unused                                       = 1023
                   // unused                                       = 1024
                   , CAT_DEPENDENT_OBJECTS_EXIST                   = 1025
-                  // unused                                       = 1026
+                  , CAT_REG_UNREG_OBJECTS                         = 1026
                   , CAT_COLUMN_PRIVILEGE_NOT_ALLOWED              = 1027
                   , CAT_SCHEMA_IS_NOT_EMPTY                       = 1028
                   , CAT_UNABLE_TO_CREATE_OBJECT                   = 1029
@@ -117,6 +117,7 @@ enum CatErrorCode { CAT_FIRST_ERROR = 1000
                   , CAT_CONSTRAINT_DATA_EXISTS                    = 1083
                   , CAT_ILLEGAL_DEFAULT_VALUE_FORMAT              = 1084
                   // unused                                       = 1085
+                  , CAT_IS_NOT_CORRECT_AUTHID                     = 1086
                   // unused                                       = 1086
                   // unused                                       = 1087
                   // unused                                       = 1088
@@ -221,6 +222,7 @@ enum CatErrorCode { CAT_FIRST_ERROR = 1000
                   , CAT_RI_CIRCULAR_DEPENDENCY                    = 1188
                   // unused                                       = 1189
 
+                  , CAT_INVALID_COMPONENT_PRIVILEGE               = 1194
                   , CAT_INVALID_NUM_OF_SALT_PARTNS                = 1196
                   , CAT_INVALID_SALTED_UNIQUE_IDX                 = 1201
                   , CAT_INVALID_SALT_LIKE_CLAUSE                  = 1202
@@ -372,6 +374,10 @@ enum CatErrorCode { CAT_FIRST_ERROR = 1000
                   // unused                                       = 1385
                   , CAT_OBJECT_DOES_NOT_EXIST_IN_TRAFODION        = 1389
                   , CAT_TRAFODION_OBJECT_EXISTS                   = 1390
+
+                  , TRAF_ALREADY_INITIALIZED                      = 1392
+                  , TRAF_NOT_INITIALIZED                          = 1393
+                  , TRAF_HBASE_ACCESS_ERROR                       = 1398
 
                   // unused                                       = 1400
                   , CAT_UNABLE_TO_CONVERT_COLUMN_DEFAULT_VALUE_TO_CHARSET = 1401

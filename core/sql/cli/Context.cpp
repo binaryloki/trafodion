@@ -173,6 +173,7 @@ ContextCli::ContextCli(CliGlobals *cliGlobals)
     arkcmpInitFailed_(&exHeap_),
     trustedRoutines_(&exHeap_),
     roleIDs_(NULL),
+    granteeIDs_(NULL),
     numRoles_(0),
     unusedBMOsMemoryQuota_(0)
 {
@@ -1274,7 +1275,7 @@ void ContextCli::closeAllCursors(enum CloseCursorType type,
             // scope.
             if (statement->getCliLevel() == getNumOfCliCalls())
             {
-              statement->close(diagsArea_, inRollback);
+              statement->close(diagsArea_, inRollback);            
             }
             // STATUSTRANSACTION slows down the response time
             // Browse access cursor that are started under a transaction
@@ -3163,6 +3164,92 @@ Lng32 ContextCli::setSecInvalidKeys(
 
 }
 
+Int32 ContextCli::checkLobLock(char *inLobLockId, NABoolean *found)
+{
+  Int32 retcode = 0;
+  *found = FALSE;
+  CliGlobals *cliGlobals = getCliGlobals();
+  StatsGlobals *statsGlobals = GetCliGlobals()->getStatsGlobals();
+  if (cliGlobals->getStatsGlobals() == NULL)
+  {
+    (diagsArea_) << DgSqlCode(-EXE_RTS_NOT_STARTED);
+    return diagsArea_.mainSQLCODE();
+  }
+  statsGlobals->checkLobLock(cliGlobals,inLobLockId);
+  if (inLobLockId != NULL)
+    *found = TRUE;
+  return retcode;
+}
+Lng32 ContextCli::setLobLock(
+     /* IN */    char *lobLockId // objID+column number
+                             )
+{
+  CliGlobals *cliGlobals = getCliGlobals();
+  NABoolean releasingLock = FALSE;
+  if (cliGlobals->getStatsGlobals() == NULL)
+  {
+    (diagsArea_) << DgSqlCode(-EXE_RTS_NOT_STARTED);
+    return diagsArea_.mainSQLCODE();
+  }
+  ComDiagsArea *tempDiagsArea = &diagsArea_;
+  IpcServer *ssmpServer = NULL;
+  tempDiagsArea->clear();
+  if (lobLockId[0] == '-')
+    releasingLock = TRUE;
+  // Get an ssmp node to talk to. Picking one based off of lobLockId should
+  // make it unique and avoid clash with another node that may be attempting 
+  // to lock the same lob
+  if (!releasingLock)
+    {
+      Int32 nodeCount = 0;
+      Int32 rc = msg_mon_get_node_info(&nodeCount, 0, NULL);
+      Int32 targetNodeId = 0;
+      Int32 lockHash = 0;
+      char myNodeName[MAX_SEGMENT_NAME_LEN+1];
+      MS_Mon_Node_Info_Type nodeInfo;
+      for (int i = 0; i < LOB_LOCK_ID_SIZE; i++)
+        lockHash +=(unsigned char)lobLockId[i];
+      if (nodeCount)
+        targetNodeId = lockHash%nodeCount;
+      rc = msg_mon_get_node_info_detail(targetNodeId, &nodeInfo);
+      if (rc == 0)
+        strcpy(myNodeName, nodeInfo.node[0].node_name);
+      else
+        myNodeName[0] = '\0';
+
+      ssmpServer = ssmpManager_->getSsmpServer(exHeap(),
+                                               //cliGlobals->myNodeName(), 
+                                               //cliGlobals->myCpu(), 
+                                               myNodeName,
+                                               targetNodeId,
+                                               tempDiagsArea);
+    }
+  else
+    ssmpServer = ssmpManager_->getSsmpServer(exHeap(),
+                                             cliGlobals->myNodeName(), 
+                                             cliGlobals->myCpu(), 
+                                             tempDiagsArea);
+  if (ssmpServer == NULL)
+    return diagsArea_.mainSQLCODE();
+
+  SsmpClientMsgStream *ssmpMsgStream  = new (cliGlobals->getIpcHeap())
+        SsmpClientMsgStream((NAHeap *)cliGlobals->getIpcHeap(), 
+                            ssmpManager_, tempDiagsArea);
+  ssmpMsgStream->addRecipient(ssmpServer->getControlConnection());
+  LobLockRequest *llMsg = 
+    new (cliGlobals->getIpcHeap()) LobLockRequest(
+                                      cliGlobals->getIpcHeap(), 
+                                      lobLockId);
+  *ssmpMsgStream << *llMsg;
+  // Call send with no timeout.  
+  ssmpMsgStream->send(); 
+  // I/O is now complete.  
+  llMsg->decrRefCount();
+  cliGlobals->getEnvironment()->deleteCompletedMessages();
+  ssmpManager_->cleanupDeletedSsmpServers();
+  return diagsArea_.mainSQLCODE();
+
+}
 ExStatisticsArea *ContextCli::getMergedStats(
             /* IN */    short statsReqType,
             /* IN */    char *statsReqStr,
@@ -3888,7 +3975,9 @@ RETCODE ContextCli::authQuery(
    char localNameBuf[32];
    char isValidFromUsersTable[3];
 
-   if (queryType == USERS_QUERY_BY_USER_ID)
+   if (queryType == USERS_QUERY_BY_USER_ID ||
+       queryType == ROLE_QUERY_BY_ROLE_ID ||
+       queryType == ROLES_QUERY_BY_AUTH_ID) 
    {
       sprintf(localNameBuf, "%d", (int) authID);
       nameForDiags = localNameBuf;
@@ -3954,7 +4043,24 @@ RETCODE ContextCli::authQuery(
       case ROLES_QUERY_BY_AUTH_ID:
       {
          authInfoPtr = &authInfo;
-         authStatus = authInfo.getRoleIDs(authID, roleIDs);
+         std::vector<int32_t> roleIDs;
+         std::vector<int32_t> granteeIDs;
+         authStatus = authInfo.getRoleIDs(authID, roleIDs, granteeIDs);
+         ex_assert((roleIDs.size() == granteeIDs.size()), "mismatch between roleIDs and granteeIDs");
+         numRoles_ = roleIDs.size() + 1; // extra for public role
+         roleIDs_ = new (&exHeap_) Int32[numRoles_];
+         granteeIDs_ = new (&exHeap_) Int32[numRoles_];
+
+         for (size_t i = 0; i < roleIDs.size(); i++)
+         {
+           roleIDs_[i] = roleIDs[i];
+           granteeIDs_[i] = granteeIDs[i];
+         }
+
+         // Add the public user to the last entry
+         Int32 lastEntry = numRoles_ - 1;
+         roleIDs_[lastEntry] = PUBLIC_USER;
+         granteeIDs_[lastEntry] = databaseUserID_;
       }   
       break;
 
@@ -4113,19 +4219,35 @@ RETCODE ContextCli::setDatabaseUserByName(const char *userName)
 // *
 // * Function: ContextCli::getRoleList
 // *
-// * Return the role IDs granted to the current user 
+// * Return the role IDs and their grantees for the current user.  
 // *   If the list of roles is already stored, just return this list.
 // *   If the list of roles does not exist extract the roles granted to the
 // *     current user from the Metadata and store in roleIDs_.
 // *
 // ****************************************************************************
 RETCODE ContextCli::getRoleList(
-  Int32 &numRoles,
-  Int32 *&roleIDs)
+  Int32 &numEntries,
+  Int32 *& roleIDs,
+  Int32 *& granteeIDs)
 {
   // If role list has not been created, go read metadata
   if (roleIDs_ == NULL)
   {
+    // If authorization is not enabled, just setup the PUBLIC role
+    CmpContext *cmpCntxt = CmpCommon::context();
+    ex_assert(cmpCntxt, "No compiler context exists");
+    if (!cmpCntxt->isAuthorizationEnabled())
+    {
+      numRoles_ = 1;
+      roleIDs_ = new (&exHeap_) Int32[numRoles_];
+      roleIDs_[0] = PUBLIC_USER;
+      granteeIDs = new (&exHeap_) Int32[numRoles_];
+      granteeIDs[0] = databaseUserID_;
+      numEntries = numRoles_;
+      roleIDs = roleIDs_;
+      return SUCCESS;
+    }
+
     // Get roles for userID
     char usersNameFromUsersTable[MAX_USERNAME_LEN +1];
     Int32 userIDFromUsersTable;
@@ -4139,19 +4261,11 @@ RETCODE ContextCli::getRoleList(
                                 myRoles);  // OUT
     if (result != SUCCESS)
       return result;
-
-    // Include the public user
-    myRoles.push_back(PUBLIC_USER);
-
-    // Add role info to ContextCli
-    numRoles_ = myRoles.size();
-    roleIDs_ = new (&exHeap_) Int32[numRoles_];
-    for (size_t i = 0; i < numRoles_; i++)
-      roleIDs_[i] = myRoles[i];
   }
 
-  numRoles = numRoles_;
+  numEntries = numRoles_;
   roleIDs = roleIDs_;
+  granteeIDs = granteeIDs_;
 
   return SUCCESS;
 }
@@ -4170,6 +4284,11 @@ RETCODE ContextCli::resetRoleList()
   if (roleIDs_)
     NADELETEBASIC(roleIDs_, &exHeap_);
   roleIDs_ = NULL;
+
+  if (granteeIDs_)
+    NADELETEBASIC(granteeIDs_, &exHeap_);
+  granteeIDs_ = NULL;
+
   numRoles_ = 0;
 
   return SUCCESS;
@@ -4359,128 +4478,6 @@ RETCODE ContextCli::getAuthNameFromID(
 //******************* End of ContextCli::getAuthNameFromID *********************
 
 
-
-
-
-
-// Public method to map an integer user ID to a user name
-RETCODE ContextCli::getDBUserNameFromID(Int32 userID,         // IN
-                                        char *userNameBuffer, // OUT
-                                        Int32 maxBufLen,      // IN
-                                        Int32 *requiredLen)   // OUT optional
-{
-  RETCODE result = SUCCESS;
-  char usersNameFromUsersTable[MAX_USERNAME_LEN + 1];
-  Int32 userIDFromUsersTable;
-  std::vector<int32_t> roleIDs;
-  if (requiredLen)
-    *requiredLen = 0;
-  
-  // Cases to consider
-  // * userID is the current user ID
-  // * SYSTEM_USER and PUBLIC_USER have special integer user IDs and
-  //   are not registered in the USERS table
-  // * other users
-
-  NABoolean isCurrentUser =
-    (userID == (Int32) databaseUserID_ ? TRUE : FALSE);
-
-  const char *currentUserName = NULL;
-  if (isCurrentUser)
-  {
-    currentUserName = databaseUserName_;
-  }
-  else
-  {
-    // See if the USERS row exists
-    result = authQuery(USERS_QUERY_BY_USER_ID,
-                       NULL,        // IN user name (ignored)
-                       userID,      // IN user ID
-                       usersNameFromUsersTable, //OUT
-                       sizeof(usersNameFromUsersTable),
-                       userIDFromUsersTable,
-                       roleIDs);  // OUT
-    if (result != ERROR)
-      currentUserName = usersNameFromUsersTable;
-  }
-
-  // Return the user name if the lookup was successful
-  if (result != ERROR)
-  {
-    ex_assert(currentUserName, "currentUserName should not be NULL");
-
-    Int32 bytesNeeded = strlen(currentUserName) + 1;
-    
-    if (bytesNeeded > maxBufLen)
-    {
-      diagsArea_ << DgSqlCode(-CLI_USERNAME_BUFFER_TOO_SMALL);
-      if (requiredLen)
-        *requiredLen = bytesNeeded;
-      result = ERROR;
-    }
-    else
-    {
-      strcpy(userNameBuffer, currentUserName);
-    }
-  }
-  
-  return result;
-}
-  
-// Public method to map a user name to an integer user ID
-RETCODE ContextCli::getDBUserIDFromName(const char *userName, // IN
-                                        Int32 *userID)        // OUT
-{
-  
-   if (userName == NULL || userID == NULL)
-      return ERROR;
-
-// Cases to consider
-// * userName is the current user name
-// * SYSTEM_USER and PUBLIC_USER have special integer user IDs and
-//   are not registered in the USERS table
-// * other users
-
-   if (databaseUserName_ && strcasecmp(userName,databaseUserName_) == 0)
-   {
-      *userID = databaseUserID_;
-      return SUCCESS;
-   }
-   
-   if (strcasecmp(userName,ComUser::getPublicUserName()) == 0)
-   {
-      *userID = ComUser::getPublicUserID();
-      return SUCCESS;
-   }
-   
-   if (strcasecmp(userName,ComUser::getSystemUserName()) == 0)
-   {
-      *userID = ComUser::getSystemUserID();
-      return SUCCESS;
-   }
-  
-   // See if the AUTHS row exists
-
-   RETCODE result = SUCCESS;
-   char usersNameFromUsersTable[MAX_USERNAME_LEN + 1];
-   Int32 userIDFromUsersTable;
-   std::vector<int32_t> roleIDs;
-
-   result = authQuery(USERS_QUERY_BY_USER_NAME,
-                      userName,    // IN user name
-                      0,           // IN user ID (ignored)
-                      usersNameFromUsersTable, //OUT
-                      sizeof(usersNameFromUsersTable),
-                      userIDFromUsersTable,
-                      roleIDs);  // OUT
-   if (result == SUCCESS && userID)
-      *userID = userIDFromUsersTable;
-
-   return result;
-  
-}
-
-// Public method only meant to be called in ESPs. All we do is call
 // the private method to update user ID data members. On platforms
 // other than Linux the method is a no-op.
 void ContextCli::setDatabaseUserInESP(const Int32 &uid, const char *uname,
@@ -4790,7 +4787,10 @@ RETCODE ContextCli::storeName(
 
    actualLength = strlen(src);
    if (actualLength >= maxLength)
+   {
+      diagsArea_ << DgSqlCode(-CLI_USERNAME_BUFFER_TOO_SMALL);
       return ERROR;
+   }
    
    memcpy(dest,src,actualLength);
    dest[actualLength] = 0;
@@ -4887,5 +4887,4 @@ void ContextCli::disconnectHdfsConnections()
           hdfsDisconnect(entry->hdfsHandle_);         
         }
     }
-  
 }

@@ -3186,38 +3186,13 @@ HSGlobalsClass::~HSGlobalsClass()
   DeleteHSContext(contID_);
 }
 
+
 // -----------------------------------------------------------------------
-//
+// Initialize stats schema for Hive or native HBase tables if needed
 // -----------------------------------------------------------------------
-Lng32 HSGlobalsClass::Initialize()
+Lng32 HSGlobalsClass::InitializeStatsSchema()
   {
     Lng32 retcode = 0;
-    NAString query;
-    HSCursor cursor;
-    Int64 xSampleSet = 0;
-    char intStr[30], intStr2[30];
-    Int64 inserts, deletes, updates;
-    HSLogMan *LM = HSLogMan::Instance();
-    HSGlobalsClass *hs_globals = GetHSContext();
-
-    // Seed the random number generator used in quicksort().
-    srand(time(NULL));
-    // Set the default catalog names for Hive and HBase.
-    if (defaultHiveCatName == NULL)
-       defaultHiveCatName = new (GetCliGlobals()->exCollHeap()) NAString("");
-    else
-      (*defaultHiveCatName) = "";
-
-    CmpCommon::getDefault(HIVE_CATALOG, (*defaultHiveCatName), FALSE);
-    (*defaultHiveCatName).toUpper();
-
-    if (defaultHbaseCatName == NULL)
-       defaultHbaseCatName = new (GetCliGlobals()->exCollHeap()) NAString("");
-    else
-      (*defaultHbaseCatName) = "";
-
-    CmpCommon::getDefault(HBASE_CATALOG, (*defaultHbaseCatName), FALSE);
-    (*defaultHbaseCatName).toUpper();
 
                                               /*==============================*/
                                               /*   CREATE HIVE STATS SCHEMA   */
@@ -3260,6 +3235,47 @@ Lng32 HSGlobalsClass::Initialize()
     retcode = CreateHistTables(this);
     HSHandleError(retcode);
 
+    return retcode;
+  }
+
+
+
+// -----------------------------------------------------------------------
+//
+// -----------------------------------------------------------------------
+Lng32 HSGlobalsClass::Initialize()
+  {
+    Lng32 retcode = 0;
+    NAString query;
+    HSCursor cursor;
+    Int64 xSampleSet = 0;
+    char intStr[30], intStr2[30];
+    Int64 inserts, deletes, updates;
+    HSLogMan *LM = HSLogMan::Instance();
+    HSGlobalsClass *hs_globals = GetHSContext();
+
+    // Seed the random number generator used in quicksort().
+    srand(time(NULL));
+    // Set the default catalog names for Hive and HBase.
+    if (defaultHiveCatName == NULL)
+       defaultHiveCatName = new (GetCliGlobals()->exCollHeap()) NAString("");
+    else
+      (*defaultHiveCatName) = "";
+
+    CmpCommon::getDefault(HIVE_CATALOG, (*defaultHiveCatName), FALSE);
+    (*defaultHiveCatName).toUpper();
+
+    if (defaultHbaseCatName == NULL)
+       defaultHbaseCatName = new (GetCliGlobals()->exCollHeap()) NAString("");
+    else
+      (*defaultHbaseCatName) = "";
+
+    CmpCommon::getDefault(HBASE_CATALOG, (*defaultHbaseCatName), FALSE);
+    (*defaultHbaseCatName).toUpper();
+
+    // initialize stats schema if this is a Hive or native HBase table
+    retcode = InitializeStatsSchema();
+    HSHandleError(retcode);    
 
                                              /*==============================*/
                                              /*   CREATE UNDOCUMENTED VIEW   */
@@ -3688,10 +3704,7 @@ NABoolean HSGlobalsClass::isAuthorized(NABoolean isShowStats)
   if (!CmpCommon::context()->isAuthorizationEnabled())
     return TRUE;
 
-   // no privilege support available for hbase and hive tables
-   HS_ASSERT (objDef->getNATable());
-   if (CmpSeabaseDDL::isHbase(objDef->getCatName()))
-     return TRUE;
+  HS_ASSERT (objDef->getNATable());
 
   // Let keep track of how long authorization takes
   HSLogMan *LM = HSLogMan::Instance();
@@ -3790,12 +3803,12 @@ NABoolean HSGlobalsClass::isAuthorized(NABoolean isShowStats)
 // the fully-qualified table names.
 void HSGlobalsClass::initJITLogData()
 {
-  char* sqroot = getenv("TRAF_HOME");
-  if (!sqroot)
+  char* sqlogs = getenv("TRAF_LOG");
+  if (!sqlogs)
     return;
   
-  NAString filePath = sqroot;
-  filePath.append("/logs/jit_ulog_params");
+  NAString filePath = sqlogs;
+  filePath.append("/jit_ulog_params");
   FILE* jitParamFile = fopen(filePath.data(), "r");
   if (!jitParamFile)
     return;
@@ -5331,13 +5344,16 @@ Lng32 HSGlobalsClass::validateIUSWhereClause()
 {
   Lng32 retcode = 0;
 
+  // use QualifiedName constructor to correctly handle delimited names.
+  QualifiedName qualTableName(user_table->data(), 1);
+  NAString tableNameStr = qualTableName.getUnqualifiedObjectNameAsAnsiString();
+  NAString query = "select count(*) from ";
+  query.append(tableNameStr);
+  query.append(" where ").append(getWherePredicateForIUS());
+
   // set PARSING_IUS_WHERE_CLAUSE bit in Sql_ParserFlags; return it to
   // its entry value on exit
   PushAndSetSqlParserFlags savedParserFlags(PARSING_IUS_WHERE_CLAUSE);
-
-  NAString query = "select count(*) from ";
-  query.append(getTableName(strrchr(user_table->data(), '.')+1, nameSpace));
-  query.append(" where ").append(getWherePredicateForIUS());
 
   Parser parser(CmpCommon::context());
   Lng32 diagsMark = diagsArea.mark();
@@ -8530,6 +8546,7 @@ Lng32 HSGlobalsClass::groupListFromTable(HSColGroupStruct*& groupList,
                                       (void *)&colNum, (void *)&colCount
                                       );
           // Don't read any more (break out of loop) if fetch did not succeed.
+          HSFilterWarning(retcode);
           if (retcode)
             break;
           // If EXISTING keyword specified and REASON field is EMPTY, skip.
@@ -10457,6 +10474,7 @@ Lng32 HSGlobalsClass::DisplayHistograms(NAString& displayData, Space& space,
 
     // Go ahead to write information for intervals of this histogram if DETAIL
     // option was specified, else return now.
+    HSFilterWarning(retcode);  // clean up any warnings before possible return
     if (!(optFlags & DETAIL_OPT))
         return 0;
 
@@ -10582,6 +10600,8 @@ Lng32 HSGlobalsClass::DisplayHistograms(NAString& displayData, Space& space,
     }
     intData.close();
     displayData += "\n";
+
+    HSFilterWarning(retcode);  // filter out any warnings so HSErrorCatcher doesn't act up
 
     return 0;
 }
@@ -15969,6 +15989,10 @@ Lng32 managePersistentSamples()
   if (!hs_globals) retcode = -1;
   else
   {
+    // initialize stats schema if our object is a Hive or native HBase table
+    retcode = hs_globals->InitializeStatsSchema();
+    HSHandleError(retcode);
+
     NAString table;
     Int64 sampleRows, tableRows;
     NABoolean isEstimate = FALSE;

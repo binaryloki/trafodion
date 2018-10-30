@@ -67,6 +67,7 @@
 // This solves the problem because bison does not have to reduce after reading TOK_DROP. Rather,
 // after reading TOK_DROP TOK_TABLE, it can lookahead at the next token to decide what to do.
 
+
 #include "Platform.h"				// must be the first #include
 //debug yacc
 #define YY_LOG_FILE "yylog"
@@ -154,6 +155,9 @@ using namespace std;
 #include "SqlParserAux.h"
 #include "StmtCompilationMode.h"
 #include "StmtDMLSetTransaction.h"
+
+#include "StmtDDLonHiveObjects.h"
+
 // -- triggers
 #include "Triggers.h"
 #include "ItemNAType.h"
@@ -173,7 +177,6 @@ using namespace std;
 #include "exp_clause_derived.h"
 #include "exp_datetime.h"
 #include "Analyzer.h"
-
 
 #include "OptimizerSimulator.h"
 
@@ -340,6 +343,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <item>      ARITH_PLACEHOLDER
 %token <item>      BOOL_PLACEHOLDER
 %token <stringval> DELIMITED_IDENTIFIER
+%token <stringval> BACKQUOTED_IDENTIFIER
 %token <stringval> CALL_CASED_IDENTIFIER
 %token <stringval> GOTO_CASED_IDENTIFIER
 %token <stringval> PERFORM_CASED_IDENTIFIER
@@ -497,6 +501,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_CARDINALITY
 %token <tokval> TOK_CASE
 %token <tokval> TOK_CAST
+%token <tokval> TOK_CENTURY
 %token <tokval> TOK_TYPECAST
 %token <tokval> TOK_CATCHUP	  // MV
 %token <tokval> TOK_TRANSLATE
@@ -619,6 +624,9 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_DYNAMIC
 %token <tokval> TOK_DYNAMIC_FUNCTION    /* ANSI SQL non-reserved word */
 %token <tokval> TOK_D_RANK             /* Tandem extension non-reserved word */
+%token <tokval> TOK_DECADE
+%token <tokval> TOK_DOW
+%token <tokval> TOK_DOY
 %token <tokval> TOK_EACH                
 %token <tokval> TOK_EID
 %token <tokval> TOK_ELSEIF
@@ -653,6 +661,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_EXTRACT
 %token <tokval> TOK_EXTRACT_SOURCE
 %token <tokval> TOK_EXTRACT_TARGET
+%token <tokval> TOK_EPOCH
 %token <tokval> TOK_FALSE
 %token <tokval> TOK_FAMILY
 %token <tokval> TOK_FEATURE_VERSION_INFO   /* Versioning. Non-reserved */
@@ -679,6 +688,9 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_FOR_REPEATABLE      /* FOR REPEATABLE */
 %token <tokval> TOK_FOR_SERIALIZABLE    /* FOR SERIALIZABLE */
 %token <tokval> TOK_FOR_STABLE          /* FOR STABLE */
+%token <tokval> TOK_FOR_USER          /* FOR GET .. FOR USER */
+%token <tokval> TOK_FOR_ROLE          /* FOR GET ... FOR ROLE */
+%token <tokval> TOK_FOR_LIBRARY          /* FOR GET ... FOR LIBRARY */
 %token <tokval> TOK_FOUND
 %token <tokval> TOK_FRACTION            /* Tandem extension non-reserved word */
 %token <tokval> TOK_FROM
@@ -726,6 +738,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_INOUT
 %token <tokval> TOK_INSTR
 %token <tokval> TOK_NOT_IN
+%token <tokval> TOK_SYS_GUID
 %token <tokval> TOK_INCLUSIVE
 %token <tokval> TOK_INDICATOR
 %token <tokval> TOK_INITIALIZATION // MV 
@@ -846,6 +859,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_MONTHNAME
 %token <tokval> TOK_MORE                /* ANSI SQL non-reserved word */
 %token <tokval> TOK_MRANK               /* Tandem extension non-reserved word */
+%token <tokval> TOK_MSCK
 %token <tokval> TOK_MSTDDEV             /* Tandem extension non-reserved word */
 %token <tokval> TOK_MSUM                /* Tandem extension non-reserved word */
 %token <tokval> TOK_MV                  
@@ -973,6 +987,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_REMOTE
 %token <tokval> TOK_TEMP_TABLE         
 %token <tokval> TOK_TEMPORARY
+%token <tokval> TOK_REPAIR
 %token <tokval> TOK_REPEAT
 %token <tokval> TOK_REPEATABLE          /* ANSI SQL non-reserved word */ 
 %token <tokval> TOK_REPEATABLE_ACCESS   /* Tandem extension */
@@ -1045,9 +1060,8 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_SHOWDDL_COMPONENT
 %token <tokval> TOK_SHOWDDL_LIBRARY
 %token <tokval> TOK_SHOWDDL_SEQUENCE
+%token <tokval> TOK_SHOWDDL_USER
 %token <tokval> TOK_SHOWDDL             /* Tandem extension non-reserved word */
-%token <tokval> TOK_SHOWLABEL           /* Tandem extension     reserved word */
-%token <tokval> TOK_SHOWLEAKS           /* Tandem extension non-reserved word*/
 %token <tokval> TOK_SYSDATE
 %token <tokval> TOK_SYSTIMESTAMP
 %token <tokval> TOK_TARGET
@@ -1078,6 +1092,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_STATUS
 %token <tokval> TOK_STDDEV              /* Tandem extension */
 %token <tokval> TOK_STOP                /* Tandem extension */
+%token <tokval> TOK_SPLIT_PART          /* Trafodion extension*/ 
 %token <tokval> TOK_STORED
 %token <tokval> TOK_SQL
 %token <tokval> TOK_SQL_DOUBLE
@@ -1172,6 +1187,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_WAITEDIO
 %token <tokval> TOK_WCHAR
 %token <tokval> TOK_WEEK
+%token <tokval> TOK_WOM
 %token <tokval> TOK_WHEN
 %token <tokval> TOK_WHENEVER
 %token <tokval> TOK_WHERE
@@ -1434,6 +1450,9 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %token <tokval> TOK_ACTIVE           /* Tandem extension non-reserved word */
 %token <tokval> TOK_RMS         /* Tandem extension non-reserved word */
 %token <tokval> TOK_REVERSE
+%token <tokval> TOK_OVERLAY
+%token <tokval> TOK_STUFF      /* same as overlay */
+%token <tokval> TOK_PLACING
 
 %token <tokval> TOK_DATA_OFFSET        /* INTERNAL non-reserved word */
 %token <tokval> TOK_NULL_IND_OFFSET    /* INTERNAL non-reserved word */
@@ -1908,8 +1927,6 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <tokval>    		sign
 %type <corrName>  		table_name
 %type <corrName>		special_table_name
-%type <corrName>  		label_name
-%type <corrName>  		extended_label_name
 %type <corrName>  		actual_table_name
 %type <corrName>  		actual_table_name2
 %type <corrName>		exception_table_name
@@ -1917,6 +1934,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <stringval> 		identifier_with_hat
 %type <stringval> 		identifier_with_dollar
 %type <strSeq>    		qualified_name
+%type <strSeq>    		schema_name_ss
 %type <strSeq>    		module_name
 %type <strSeq>    		routine_action_name
 %type <stringval> 		correlation_name
@@ -2041,6 +2059,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <intervalQualifier>	end_field
 %type <intervalQualifier>       fraction_only_interval
 %type <datetimeField>		non_second_datetime_field
+%type <datetimeField>		new_non_second_datetime_field
 %type <datetimeField>		datetime_field
 %type <datetimeQualifier>       datetime_qualifier           //For MP Datetime
 %type <datetimeQualifier>       datetime_start_field         //For MP Datetime
@@ -2143,6 +2162,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <item>      		in_predicate
 %type <item>      		like_predicate
 %type <tokval>	  		not_like
+%type <item>	  		  overlaps_predicate 
 %type <item>      		quantified_predicate
 %type <item>      		search_condition
 %type <item>      		boolean_term
@@ -2223,10 +2243,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <corrName>                optional_showddl_action_name_clause
 %type <longint>                 showddl_options_list
 %type <longint>                 showddl_options
-%type <longint>                 showlabel_options
 %type <describeType>            showcontrol_type
-%type <uint>                    showleaks_process
-%type <uint>                    showleaks_session
 //%type <uint>      		returning_clause
 %type <item>      		input_hostvar_expression
 %type <item>      		hostvar_expression
@@ -2266,13 +2283,14 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <pElemDDL>                optional_schema_clause
 %type <stringval>               optional_as_auth_clause
 %type <stringval> 		external_user_identifier
-%type <tokval>	 		user_or_role
+%type <tokval>	 		for_user_or_role
 %type <tokval>                  procedure_or_function
 %type <pStmtDDL>  		sql_schema_statement
 %type <pStmtDDL>  		sql_schema_definition_statement
 %type <pStmtDDL>  		sql_schema_manipulation_statement
 %type <pStmtDDL>  		sql_schema_statement_prologue
 %type <pStmtDDL>  		schema_definition
+%type <uint>   	        	schema_or_database
 %type <pStmtDDL>  		routine_definition
 %type <pStmtDDL>                alter_function_statement
 %type <pElemDDL>                routine_params_list
@@ -2515,8 +2533,10 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <pStmtDDL>                alter_table_disable_constraint_clause
 %type <pStmtDDL>                alter_table_enable_constraint_clause
 %type <pStmtDDL>  		alter_table_action
+%type <uint>   	        	alter_table_start_tokens
+%type <uint>   	        	alter_view_start_tokens
+%type <uint>   	        	alter_schema_start_tokens
 %type <pStmtDDL>  		alter_table_statement
-%type <pStmtDDL>                alter_database_statement
 %type <boolean>                 optional_ghost
 %type <pStmtDDL>  		revoke_schema_statement
 %type <pStmtDDL>                revoke_component_privilege_stmt
@@ -2590,7 +2610,6 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <item>      		datetime_value_function
 %type <item>      		datetime_misc_function
 %type <item>      		datetime_misc_function_used_as_default
-%type <item>      	        sequence_as_default	
 %type <stringval>  		format_attributes
 %type <pElemDDL>  		optional_constraint_attributes
 %type <pElemDDL>  		constraint_attributes
@@ -2752,6 +2771,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <tokval>    		left_outer
 %type <tokval>    		optional_col_keyword
 %type <boolean>                 optional_cast_spec_not_null_spec
+%type <boolean>                 optional_nullable_pkey
 %type <boolean>                 optional_encode_key_ordering_spec
 %type <CollationType>		optional_Collation_type
 %type <SortDirection>		optional_sort_direction
@@ -2793,7 +2813,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <item>                    balance_when_then
 %type <item>                    balance_else
 %type <item>                    balance_expr
-%type <longint>			options
+%type <longint>			showplan_options
 
 %type <relx>                    routine_invocation
 %type <relx>                    standalone_call_statement
@@ -2858,9 +2878,8 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <pSchemaName>             optional_from_schema
 %type <stringval>               get_statistics_optional_options
 
-%type <relx>                    exe_util_fast_delete
-%type <longint>                 purgedata_options
-%type <relx>                    exe_util_hive_truncate
+%type <ptr_placeholder>         truncate_table_name
+%type <relx>                    truncate_table
 
 %type <relx>                    exe_util_get_metadata_info
 %type <relx>                    exe_util_get_version_info
@@ -2880,6 +2899,7 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <stringval>               explain_starting_tokens
 %type <stringval> 		explain_identifier
 %type <stmt_ptr> 		explain_stmt_finalized
+%type <uint>                    showplan_starting_tokens
 %type <strSeq>                  routine_name
 %type <item>                    routine_arg_list
 %type <corrName>		actual_routine_name
@@ -2924,6 +2944,8 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <item>                   locking_stmt
 %type <parTriggerScopeType>         optional_row_table
 
+%type <stringval>              optional_hive_options
+
 %type <tableTokens>            create_table_start_tokens
 %type <tableLoadAttrEnum>      ctas_load_and_in_memory_options
 %type <pElemDDL>               ctas_insert_columns
@@ -2934,6 +2956,8 @@ static void enableMakeQuotedStringISO88591Mechanism()
 %type <extractType>            extract_type
 %type <boolean>                optional_if_not_exists_clause
 %type <boolean>                optional_if_exists_clause
+%type <boolean>                optional_if_not_registered_clause
+%type <boolean>                optional_if_registered_clause
 
 %type <uint>                    merge_stmt_start_tokens
 %type <relx>                   merge_stmt_using_clause
@@ -5534,34 +5558,6 @@ actual_routine_action_name : routine_action_name
 		     $$->getQualifiedNameObj().setObjectNameSpace(COM_UUDF_ACTION_NAME);
 		  }
 
-/* type corrName */
-label_name : qualified_name
-		  {
-		     //
-		     // note that corrNameFromStrings()
-		     // contains code that deletes $1
-		     //
-		     $$ = corrNameFromStrings($1);
-		     if ($$ == NULL) YYABORT;
-		  }
-              | guardian_location_name
-	          {
-		    ComLocationName locName(*$1,
-		      ComLocationName::GUARDIAN_LOCATION_NAME_FORMAT);
-		    if (NOT locName.isValid())
-		      {
-			// The format of the specified location name
-			// $0~string0 is invalid.
-			*SqlParser_Diags << DgSqlCode(-3061)
-			  << DgString0($1->data());
-		      }
-		    delete $1;
-		    CorrName *result = new (PARSERHEAP()) CorrName();
-		    result->setLocationName(locName.
-		      getGuardianFullyQualifiedName());
-		    $$ = result;
-		  }
-
 /* 100% identical to "actual_table_name", actual_table_name2 is provided only
  * for use in the "select_list_item" productions.  By doing so, it
  * provides a way to get around a reduce/reduce problem that would
@@ -5636,8 +5632,22 @@ identifier : regular_identifier
 				}
               | DELIMITED_IDENTIFIER
 				{
-				   $$=$1;
-				   if ( ($$==NULL) || transformIdentifier(*$$)) YYERROR;
+                                  $$=$1;
+                                  if ( ($$==NULL) || transformIdentifier(*$$)) YYERROR;
+				}
+              | BACKQUOTED_IDENTIFIER
+				{
+                                  if (NOT SqlParser_CurrentParser->hiveDDLInfo_->checkForDDL_)
+                                    {
+                                      yyerror(""); 
+                                      YYERROR;
+                                    }
+
+                                  $$=$1;
+                                  if ( ($$==NULL) || transformIdentifier(*$$)) YYERROR;
+
+                                  SqlParser_CurrentParser->hiveDDLInfo_->backquotedDelimFound_ = TRUE;
+
 				}
 
 /* type stringval */
@@ -5797,7 +5807,7 @@ qualified_name : identifier
                   if (! $1->isValid()) 
                     YYABORT;
 
-                    $$ = $1;
+                  $$ = $1;
                 }
 
 /* type strSeq */
@@ -8719,10 +8729,18 @@ datetime_value_function : TOK_CURDATE '(' ')'
                                    ItemExpr * ie = new (PARSERHEAP()) UnixTimestamp($3);
                                    $$ = new (PARSERHEAP()) Cast(ie, type);
 				}
+    | TOK_SYS_GUID '(' ')'
+              {
+                  ItemExpr * uniqueId =  new (PARSERHEAP()) BuiltinFunction(ITM_UNIQUE_ID_SYS_GUID, PARSERHEAP());
+                  ItemExpr *conv = new (PARSERHEAP()) ConvertHex(ITM_CONVERTTOHEX, uniqueId);
+                  NAType * type;
+                  type = new (PARSERHEAP())
+                       SQLVarChar(PARSERHEAP() , 32, FALSE);
+                  $$ = new (PARSERHEAP()) Cast(conv,type);
+              }
     | TOK_UUID '(' ')'
               {
                   ItemExpr * uniqueId =  new (PARSERHEAP()) BuiltinFunction(ITM_UNIQUE_ID, PARSERHEAP());
-                  //ItemExpr *conv = new (PARSERHEAP()) ConvertHex(ITM_CONVERTTOHEX, uniqueId);
                   NAType * type;
                   type = new (PARSERHEAP())
                        SQLVarChar(PARSERHEAP() , 36, FALSE);
@@ -8731,7 +8749,6 @@ datetime_value_function : TOK_CURDATE '(' ')'
     | TOK_UUID_SHORT '(' ')'
               {
                   ItemExpr * uniqueId =  new (PARSERHEAP()) BuiltinFunction(ITM_UNIQUE_SHORT_ID, PARSERHEAP());
-                  //ItemExpr *conv = new (PARSERHEAP()) ConvertHex(ITM_CONVERTTOHEX, uniqueId);
                   NAType * type;
                   type = new (PARSERHEAP())
                        SQLVarChar(PARSERHEAP() , 36, FALSE);
@@ -9280,6 +9297,28 @@ string_function :
 	  $$ = new (PARSERHEAP()) 
 	    BuiltinFunction(ITM_REVERSE, CmpCommon::statementHeap(), 1, $3);
         } 
+
+     | TOK_OVERLAY '(' value_expression TOK_PLACING value_expression TOK_FROM value_expression TOK_FOR value_expression ')'
+                  {
+		    $$ = 
+		      new (PARSERHEAP()) ZZZBinderFunction(ITM_OVERLAY, $3, $5, $7, $9);
+                  }
+     | TOK_OVERLAY '(' value_expression TOK_PLACING value_expression TOK_FROM value_expression ')'
+                  {
+		    $$ = 
+		      new (PARSERHEAP()) ZZZBinderFunction(ITM_OVERLAY, $3, $5, $7);
+                  }
+     | TOK_STUFF '(' value_expression ',' value_expression ',' value_expression ',' value_expression ')'
+                  {
+		    $$ = 
+		      new (PARSERHEAP()) ZZZBinderFunction(ITM_OVERLAY, $3, $9, $5, $7);
+                    ((ZZZBinderFunction*)$$)->setOverlayFuncWasStuff(TRUE);
+                  }
+     | TOK_SPLIT_PART '(' value_expression ',' value_expression ',' value_expression ')'
+        {                     
+               $$ = new (PARSERHEAP()) SplitPart($3, $5, $7);
+        }
+
 
 
 /* type item */
@@ -10769,6 +10808,18 @@ optional_cast_spec_not_null_spec : empty
                                   $$ = TRUE;  // NOT NULL phrase specified
                                 }
 
+optional_nullable_pkey: empty
+                                {
+                                  if (CmpCommon::getDefault(ALLOW_NULLABLE_UNIQUE_KEY_CONSTRAINT) == DF_OFF)
+                                    $$ = FALSE;
+                                  else
+                                    $$ = TRUE;
+                                }
+     | TOK_NULLABLE
+                                {
+                                  $$ = TRUE;
+                                }
+
 /* type item */
 cast_specification : TOK_CAST '(' value_expression  TOK_AS  Set_Cast_Global_False_and_data_type
                                   optional_cast_spec_not_null_spec ')'
@@ -11729,7 +11780,7 @@ blob_optional_left_len_right: '(' NUMERIC_LITERAL_EXACT_NO_SCALE optional_lob_un
 
 	  if (CmpCommon::getDefault(TRAF_BLOB_AS_VARCHAR) == DF_ON)
 	    {
-	      $$ = (Int64)CmpCommon::getDefault(TRAF_MAX_CHARACTER_COL_LENGTH );
+	      $$ = (Int64)CmpCommon::getDefaultNumeric(TRAF_MAX_CHARACTER_COL_LENGTH );
 	    }
 	  else
 	    {
@@ -11765,7 +11816,7 @@ clob_optional_left_len_right: '(' NUMERIC_LITERAL_EXACT_NO_SCALE optional_lob_un
 
 	  if (CmpCommon::getDefault(TRAF_CLOB_AS_VARCHAR) == DF_ON)
 	    {
-	      $$ = (Int64)CmpCommon::getDefault(TRAF_MAX_CHARACTER_COL_LENGTH );
+	      $$ = (Int64)CmpCommon::getDefaultNumeric(TRAF_MAX_CHARACTER_COL_LENGTH );
 	    }
 	  else
 	    {
@@ -12478,9 +12529,46 @@ non_second_datetime_field : TOK_YEAR
                           {
                             $$ = REC_DATE_MINUTE;
                           }
+new_non_second_datetime_field:
+                          TOK_CENTURY
+                          {
+                            $$ = REC_DATE_CENTURY;
+                          }
+                          | TOK_DECADE
+                          {
+                            $$ = REC_DATE_DECADE;
+                          }
+                          | TOK_WEEK
+                          {
+                            $$ = REC_DATE_WEEK;
+                          }
+                          | TOK_QUARTER
+                          {
+                            $$ = REC_DATE_QUARTER;
+                          }
+                          | TOK_EPOCH
+                          {
+                            $$ = REC_DATE_EPOCH;
+                          }
+                          | TOK_DOW
+                          {
+                            $$ = REC_DATE_DOW;
+                          }
+                          | TOK_DOY
+                          {
+                            $$ = REC_DATE_DOY;
+                          }
+                          | TOK_WOM
+                          {
+                            $$ = REC_DATE_WOM;
+                          }
 
 /* type datetimeField */
 datetime_field : non_second_datetime_field
+               {
+                 $$ = $1;
+               }
+               | new_non_second_datetime_field
                {
                  $$ = $1;
                }
@@ -14160,10 +14248,14 @@ sql_statement : interactive_query_expression
 		   {
 		      $$ = new (PARSERHEAP()) StmtQuery($1);
 		   }
-	       | TOK_DISPLAY interactive_query_expression
+	       | TOK_DISPLAY 
+                 {
+                   SqlParser_CurrentParser->hiveDDLInfo_->essd_ = Parser::HiveDDLInfo::DISPLAY_;                   
+                 }
+                 interactive_query_expression
 		   {
-		      ((RelRoot *)$2)->setDisplayTree(TRUE);
-		      $$ = new (PARSERHEAP()) StmtQuery($2);
+		      ((RelRoot *)$3)->setDisplayTree(TRUE);
+		      $$ = new (PARSERHEAP()) StmtQuery($3);
 		   }
 	       | TOK_BEGIN TOK_DECLARE TOK_SECTION
 		   {
@@ -14442,7 +14534,7 @@ sql_schema_definition_statement :
               | comment_on_statement
                                 {
                                 }
-
+				
 /* type pStmtDDL */
 sql_schema_manipulation_statement :
 
@@ -14499,9 +14591,7 @@ sql_schema_manipulation_statement :
               | alter_view_statement
 				{
 				}
-              | alter_database_statement
-                                {
-                                }
+
               | drop_synonym_stmt
                                 {
                                 }
@@ -14845,11 +14935,7 @@ interactive_query_expression:
                                 {
 				  $$ = finalize($1);
 				}
-              | exe_util_fast_delete
-                                {
-				  $$ = finalize($1);
-				}
-              | exe_util_hive_truncate
+              | truncate_table
                                 {
 				  $$ = finalize($1);
 				}
@@ -14881,11 +14967,10 @@ interactive_query_expression:
                                 {
 				  $$ = finalize($1);
 				}
-
               | exe_util_hive_query
                                 {
-                                  $$ = finalize($1);
-                                }
+				  $$ = finalize($1);
+				}
 
 dml_query : query_expression order_by_clause access_type
             optional_lock_mode for_update_spec optional_limit_spec
@@ -15197,6 +15282,15 @@ explain_starting_tokens : TOK_EXPLAIN optional_options
                                   ParSetTextStartPosForDisplayExplain(
                                         ParNameLocListPtr);
 				  $$ = $2;
+
+                                  SqlParser_CurrentParser->hiveDDLInfo_->essd_ = Parser::HiveDDLInfo::EXPLAIN_;	
+                                  if ($2)
+                                    SqlParser_CurrentParser->hiveDDLInfo_->essdOptions_ = *$2;
+                                  StringPos start;
+                                  StringPos end;
+                                  ParGetTextStartEndPosForDisplayExplain(
+                                       ParNameLocListPtr, start, end);
+                                  SqlParser_CurrentParser->hiveDDLInfo_->essdQueryStartPos_ = start;
                                 }
 
 /* type relx */
@@ -15370,13 +15464,15 @@ exe_util_get_metadata_info :
 
             $$ = gmi;
           }
-        | TOK_GET get_info_aus_clause procedure_or_function TOK_FOR TOK_LIBRARY table_name
+        | TOK_GET get_info_aus_clause procedure_or_function TOK_FOR_LIBRARY table_name
+                  optional_no_header_and_match_pattern_clause
         {
            NAString aus("ALL");    
            NAString infoType;
            NAString iof("FOR");
            NAString objType("LIBRARY"); 
            CorrName cn("");
+
            // we want an empty get_info_aus_clause;  it is just there to make the
            // production symetric with other GET statements and please the parser
            if (*$2 != "NONE")
@@ -15388,49 +15484,34 @@ exe_util_get_metadata_info :
            else
              infoType = "TABLE_FUNCTIONS" ;
 
+           PtrPlaceHolder * pph = $6;
+           NAString * noHeader = (NAString *)pph->ptr1_;
+           NAString * pattern = (NAString *)pph->ptr2_;
+           NAString * fullyQualNames = (NAString *)pph->ptr3_;
+
            ExeUtilGetMetadataInfo * gmi = new (PARSERHEAP ()) 
                     ExeUtilGetMetadataInfo(
                              aus,            // NAString &
                              infoType,       // NAString & 
                              iof,            // NAString & 
                              objType,        // NAString & objectType
-                             *($6),          // CorrName &
+                             *($5),          // CorrName &
                              NULL,           // NAString * pattern
                              TRUE,           // return fully qualified names
                              FALSE,          // getVersion 
                              NULL,             // param1 -- the library name
                              PARSERHEAP ()); // ColHeap  * oHeap 
                      
-           //gmi->setNoHeader(TRUE);
+           if (noHeader)
+             gmi->setNoHeader(TRUE);
+           else if (NOT ((CmpCommon::getDefault(IS_SQLCI) == DF_ON) ||
+                         (CmpCommon::getDefault(NVCI_PROCESS) == DF_ON)))
+             gmi->setNoHeader(TRUE);
+
            $$ = gmi;          
         } 
-        | TOK_GET TOK_CURRENT_USER
-          optional_no_header_and_match_pattern_clause
-        {
-           NAString aus("USER");
-           NAString infoType("CURRENT_USER");
-           PtrPlaceHolder * pph = $3;
-           NAString * noHeader = (NAString *)pph->ptr1_;
-           CorrName cn("DUMMY");
-           NAString nas("");
-           ExeUtilGetMetadataInfo * gmi = new (PARSERHEAP ()) ExeUtilGetMetadataInfo
-              ( aus          // NAString &
-              , infoType     // NAString &
-              , nas          // NAString &
-              , nas   // NAString & objectType
-              , cn   // CorrName &
-              , NULL         // NAString * pattern
-              , FALSE        // NABoolean returnFullyQualNames
-              , FALSE        // NABoolean getVersion
-              , NULL         // NAString * param1
-              , PARSERHEAP() // CollHeap * oHeap
-              );
-            if (noHeader)
-              gmi->setNoHeader(TRUE);
-            $$ = gmi;
-          }
         | TOK_GET get_info_aus_clause obj_priv_identifier 
-          TOK_FOR user_or_role authorization_identifier  
+          for_user_or_role authorization_identifier  
           optional_no_header_and_match_pattern_clause
           {
             NAString aus(*$2);
@@ -15438,28 +15519,15 @@ exe_util_get_metadata_info :
             if (aus == "NONE")
               aus = "USER";
 
-            if ((*$3 != "CATALOGS"  ) && (*$3 != "INDEXES"   ) && 
-                (*$3 != "MVS"       ) && (*$3 != "MVGROUPS"  ) && 
-                (*$3 != "PRIVILEGES") && (*$3 != "PROCEDURES") && 
-                (*$3 != "SCHEMAS"   ) && (*$3 != "SYNONYMS"  ) && 
-                (*$3 != "TABLES"    ) && (*$3 != "TRIGGERS"  ) &&
-                (*$3 != "VIEWS"     ) && (*$3 != "USERS"     ) &&
-                (*$3 != "ROLES"     ) && (*$3 != "LIBRARIES"     )) YYERROR;
-
             NAString infoType(*$3);
 
             NAString iof("FOR");
 
             NAString objType("USER");
-            if ($5 == TOK_ROLE)
+            if ($4 == TOK_FOR_ROLE)
               objType = "ROLE";
-
-            /* Currently just support GET USERS FOR ROLE and GET PRIVILEGES FOR ROLE */
-
-            /* if ((objType == "ROLE") && 
-                (infoType != "USERS" && infoType != "PRIVILEGES")) YYERROR; */
-
-            PtrPlaceHolder * pph      = $7;
+  
+            PtrPlaceHolder * pph      = $6;
             NAString * noHeader       = (NAString *)pph->ptr1_;
             NAString * pattern        = (NAString *)pph->ptr2_;
             NABoolean  fullyQualNames = (pph->ptr3_) ? TRUE : FALSE; 
@@ -15470,7 +15538,7 @@ exe_util_get_metadata_info :
 
             ExeUtilGetMetadataInfo * gmi = new (PARSERHEAP ()) ExeUtilGetMetadataInfo
                     (aus, infoType, iof, objType, cnm, pattern, fullyQualNames, 
-                     getVersion, $6, PARSERHEAP ());
+                     getVersion, $5,  PARSERHEAP ());
 
             if (noHeader ||
                 (NOT ((CmpCommon::getDefault(IS_SQLCI) == DF_ON) ||
@@ -15480,68 +15548,82 @@ exe_util_get_metadata_info :
             $$ = gmi;
           }
 
-user_or_role : TOK_USER | TOK_ROLE
-
-exe_util_get_metadata_info :   
-          TOK_GET get_info_aus_clause 
-          TOK_PRIVILEGES TOK_ON object_identifier table_name 
-          optional_for_user_clause 
+        | TOK_GET get_info_aus_clause TOK_PRIVILEGES TOK_ON object_identifier 
+          table_name optional_for_user_clause 
           optional_no_header_and_match_pattern_clause
           {
-				 if ((*$5 != "TABLE") && (*$5 != "SCHEMA") &&
-				     (*$5 != "VIEW" ) && (*$5 != "MV") &&
-                                     (*$5 != "USER" ) && (*$5 != "ROLE"))
-				   {
-				     YYERROR;
-				   }
+            NAString aus("ALL");
 
-				 NAString aus(*$2);
-				 if (*$2 == "ALL")
-				   aus = "ALL";
-				 else if (*$2 == "USER")
-				   aus = "USER";
-                                 else if (*$2 == "NONE")
-                                   aus = "USER";
-				 else
-				   YYERROR;
+            NAString infoType("PRIVILEGES");
+            NABoolean getVersion = FALSE;
+            PtrPlaceHolder * pph = $8;
+            NAString * noHeader = (NAString *)pph->ptr1_;
+            NAString * pattern = (NAString *)pph->ptr2_;
+            NAString * fullyQualNames = (NAString *)pph->ptr3_;
 
-				 NAString infoType("PRIVILEGES");
-				 NABoolean getVersion = FALSE;
-				 PtrPlaceHolder * pph = $8;
-				 NAString * noHeader =
-				   (NAString *)pph->ptr1_;
-				 NAString * pattern =
-				   (NAString *)pph->ptr2_;
-				 NAString * fullyQualNames =
-				   (NAString *)pph->ptr3_;
+            NAString iof("ON");
+            NAString nas("");
+            ExeUtilGetMetadataInfo * gmi =
+              new (PARSERHEAP ()) ExeUtilGetMetadataInfo
+              (aus, infoType, iof, *$5, 
+               *$6, pattern,
+               (fullyQualNames ? TRUE : FALSE),
+               getVersion,
+               $7,
+               PARSERHEAP ());
+		 
+            if (noHeader)
+              gmi->setNoHeader(TRUE);
+            else if (NOT ((CmpCommon::getDefault(IS_SQLCI) == DF_ON) ||
+                 (CmpCommon::getDefault(NVCI_PROCESS) == DF_ON)))
+              {
+               gmi->setNoHeader(TRUE);
+              }
 
-				 NAString iof("ON");
-				 NAString nas("");
-				 ExeUtilGetMetadataInfo * gmi =
-				   new (PARSERHEAP ()) ExeUtilGetMetadataInfo
-				   (aus, infoType, iof, *$5, 
-				    *$6, pattern,
-				    (fullyQualNames ? TRUE : FALSE),
-				    getVersion,
-				    $7,
-				    PARSERHEAP ());
-				 
-				 if (noHeader)
-				   gmi->setNoHeader(TRUE);
-				 else if (NOT ((CmpCommon::getDefault(IS_SQLCI) == DF_ON) ||
-					       (CmpCommon::getDefault(NVCI_PROCESS) == DF_ON)))
-				   {
-				     gmi->setNoHeader(TRUE);
-				   }
+            $$ = gmi;
+          }
+    
+      // Created a special production for getting privileges on procedures
+      // TOK_PROCEDURE as an object_identifier causes lots of parser conflicts
+      | TOK_GET get_info_aus_clause TOK_PRIVILEGES TOK_ON TOK_PROCEDURE
+        table_name optional_for_user_clause
+        optional_no_header_and_match_pattern_clause
+        {
+          NAString aus("ALL");
+          NAString infoType("PRIVILEGES");
+          NABoolean getVersion = FALSE;
+          PtrPlaceHolder * pph = $8;
+          NAString * noHeader = (NAString *)pph->ptr1_;
+          NAString * pattern = (NAString *)pph->ptr2_;
+          NAString * fullyQualNames = (NAString *)pph->ptr3_;
 
-				 $$ = gmi;
-			       }
-     
+          NAString iof("ON");
+          NAString nas("");
+          NAString ptype("PROCEDURE");
+          ExeUtilGetMetadataInfo * gmi =
+            new (PARSERHEAP ()) ExeUtilGetMetadataInfo
+            (aus, infoType, iof, ptype,
+             *$6, pattern,
+             (fullyQualNames ? TRUE : FALSE),
+             getVersion,
+             $7,
+             PARSERHEAP ());
+
+          if (noHeader)
+            gmi->setNoHeader(TRUE);
+          else if (NOT ((CmpCommon::getDefault(IS_SQLCI) == DF_ON) ||
+                        (CmpCommon::getDefault(NVCI_PROCESS) == DF_ON)))
+            {
+              gmi->setNoHeader(TRUE);
+            }
+
+          $$ = gmi;
+        }
+
       | TOK_GET get_info_aus_clause TOK_COMPONENTS 
           optional_no_header_and_match_pattern_clause
           // GET COMPONENTS
           {
-            // exe_util_get_metadata_info ::= TOK_GET TOK_COMPONENTS
             NAString aus(*$2);
             if (*$2 == "ALL")
               aus = "ALL";
@@ -15583,8 +15665,6 @@ exe_util_get_metadata_info :
         | TOK_GET get_info_aus_clause TOK_COMPONENT TOK_PRIVILEGES 
           TOK_ON component_name optional_authid_clause 
           optional_drop_behavior optional_no_header_and_match_pattern_clause 
-          // GET [CURRENT_USER] COMPONENT PRIVILEGES ON <name> or
-          // GET [CURRENT_USER] COMPONENT PRIVILEGES ON <name> FOR <authid>
           {
             NAString aus(*$2);
             if (*$2 == "ALL")
@@ -15743,10 +15823,16 @@ exe_util_get_metadata_info :
            $$ = gmi;
          }
 
+for_user_or_role : TOK_FOR_USER | TOK_FOR_ROLE
+
 optional_for_user_clause : empty { $$ = NULL; }
-                         | TOK_FOR TOK_USER authorization_identifier
+                         | TOK_FOR authorization_identifier
                          {
-			                  $$ = new(PARSERHEAP()) NAString(*$3);
+                           $$ = new(PARSERHEAP()) NAString(*$2);
+                         }
+                         | TOK_FOR_USER authorization_identifier
+                         {
+                           $$ = new(PARSERHEAP()) NAString(*$2);
                          }
 
 optional_authid_clause : empty { $$ = NULL; }
@@ -15764,16 +15850,14 @@ get_info_aus_clause :  empty { $$ = new (PARSERHEAP()) NAString("NONE"); }
                      | TOK_TEMP_TABLE   { $$ = new (PARSERHEAP()) NAString("TRIGTEMP");}
                      | TOK_SYSTEM { $$ = new (PARSERHEAP()) NAString("SYSTEM"); }
                      | TOK_EXTERNAL { $$ = new (PARSERHEAP()) NAString("EXTERNAL"); }
-                     | TOK_VERSION TOK_OF { $$ = new (PARSERHEAP()) NAString("VERSION_USER"); }
-                     | TOK_VERSION TOK_OF TOK_ALL { $$ = new (PARSERHEAP()) NAString("VERSION_ALL"); }
-                     | TOK_VERSION TOK_OF TOK_USER { $$ = new (PARSERHEAP()) NAString("VERSION_USER"); }
-                     | TOK_VERSION TOK_OF TOK_SYSTEM { $$ = new (PARSERHEAP()) NAString("VERSION_SYSTEM"); }
 
 object_identifier : 
                     TOK_CATALOG  { $$ = new (PARSERHEAP()) NAString("CATALOG"); }
                   | TOK_CONSTRAINT{ $$ = new (PARSERHEAP()) NAString("CONSTRAINT"); }
                   | TOK_INDEX    { $$ = new (PARSERHEAP()) NAString("INDEX"); }
                   | TOK_LIBRARY  { $$ = new (PARSERHEAP()) NAString("LIBRARY"); }
+                  | TOK_TABLE_MAPPING TOK_FUNCTION  { $$ = new (PARSERHEAP()) NAString("ROUTINE"); }
+                  | TOK_FUNCTION  { $$ = new (PARSERHEAP()) NAString("ROUTINE"); }
                   | TOK_MV       { $$ = new (PARSERHEAP()) NAString("MV"); }
                   | TOK_SCHEMA   { $$ = new (PARSERHEAP()) NAString("SCHEMA"); }
                   | TOK_SYNONYM  { $$ = new (PARSERHEAP()) NAString("SYNONYM"); }
@@ -16451,7 +16535,7 @@ optional_from_schema : /* empty */
 	       }
 
 /* type relx */
-exe_util_init_hbase : TOK_INITIALIZE TOK_TRAFODION
+exe_util_init_hbase :TOK_INITIALIZE TOK_TRAFODION 
                {
 		 CharInfo::CharSet stmtCharSet = CharInfo::UnknownCharSet;
 		 NAString * stmt = getSqlStmtStr ( stmtCharSet  // out - CharInfo::CharSet &
@@ -16466,6 +16550,7 @@ exe_util_init_hbase : TOK_INITIALIZE TOK_TRAFODION
 
                  de->setInitHbase(TRUE);
                  de->setCreateMDViews(TRUE);
+                 de->setReturnStatus(TRUE);
 
 		 $$ = de;
 	       }
@@ -16486,17 +16571,17 @@ exe_util_init_hbase : TOK_INITIALIZE TOK_TRAFODION
                  de->setInitHbase(TRUE);
                  de->setCreateMDViews(TRUE);
                  de->setMinimal(TRUE);
+                 de->setReturnStatus(TRUE);
 
 		 $$ = de;                
                }
 
-           | TOK_INITIALIZE TOK_TRAFODION ',' TOK_NO TOK_METADATA TOK_VIEWS
+          | TOK_INITIALIZE TOK_TRAFODION ',' TOK_NO TOK_RETURN TOK_STATUS
                {
 		 CharInfo::CharSet stmtCharSet = CharInfo::UnknownCharSet;
 		 NAString * stmt = getSqlStmtStr ( stmtCharSet  // out - CharInfo::CharSet &
 						   , PARSERHEAP() 
 	                                       );
-
 
                  DDLExpr * de = new(PARSERHEAP()) DDLExpr
                    (NULL,
@@ -16505,9 +16590,30 @@ exe_util_init_hbase : TOK_INITIALIZE TOK_TRAFODION
                     PARSERHEAP());
 
                  de->setInitHbase(TRUE);
+                 de->setCreateMDViews(TRUE);
 
 		 $$ = de;
 	       }
+          | TOK_INITIALIZE TOK_TRAFODION ',' TOK_MINIMAL ',' TOK_NO TOK_RETURN TOK_STATUS
+               {
+ 		 CharInfo::CharSet stmtCharSet = CharInfo::UnknownCharSet;
+		 NAString * stmt = getSqlStmtStr ( stmtCharSet  // out - CharInfo::CharSet &
+						   , PARSERHEAP() 
+	                                       );
+
+                 DDLExpr * de = new(PARSERHEAP()) DDLExpr
+                   (NULL,
+                    (char*)stmt->data(), 
+                    stmtCharSet,
+                    PARSERHEAP());
+
+                 de->setInitHbase(TRUE);
+                 de->setCreateMDViews(TRUE);
+                 de->setMinimal(TRUE);
+
+		 $$ = de;                
+               }
+
 
              | TOK_INITIALIZE TOK_TRAFODION ',' TOK_DROP
                {
@@ -16824,18 +16930,22 @@ exe_util_hive_query : TOK_PROCESS TOK_HIVE TOK_STATEMENT QUOTED_STRING
                       } 
                     | TOK_PROCESS TOK_HIVE TOK_DDL QUOTED_STRING
                       {
-                        $$ = new (PARSERHEAP()) 
-                          ExeUtilHiveQuery(*$4, ExeUtilHiveQuery::FROM_STRING,
-                                           PARSERHEAP());
-                      } 
+                        SqlParser_CurrentParser->hiveDDLInfo_->
+                          setValues(TRUE, StmtDDLonHiveObjects::PASSTHRU_DDL_, StmtDDLonHiveObjects::UNKNOWN_TYPE_);
+
+                        SqlParser_CurrentParser->hiveDDLInfo_->userSpecifiedStmt_ = *$4;
+                        SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_ = TRUE;
+
+                        // error out. Caller will handle this stmt.
+                        YYERROR;
+                        $$ = NULL;
+                    }
                     | TOK_PROCESS TOK_HIVE TOK_STATEMENT TOK_FROM TOK_FILE QUOTED_STRING
                       {
                         $$ = new (PARSERHEAP()) 
                           ExeUtilHiveQuery(*$6, ExeUtilHiveQuery::FROM_FILE,
                                            PARSERHEAP());
                       } 
-
-     
 /*
  * The purpose of dummy_token_lookahead is to force the lexer to look
  * one token ahead.  This may be necessary in cases where the parser
@@ -17087,7 +17197,7 @@ exe_util_display_explain: explain_starting_tokens interactive_query_expression d
 		  // xn will be started, if needed, when the exeutilstmt stmt
 		  // is processed.
 		  eue->xnNeeded() = FALSE;
-		  
+
 		  $$ = eue;
 		  
 		  delete stmt;
@@ -17866,66 +17976,68 @@ optional_mt_options :   QUOTED_STRING
 		       $$ = NULL;
 		     }
 
-exe_util_fast_delete:  TOK_PURGEDATA table_name purgedata_options
+/* type corrName */
+truncate_table_name : TOK_PURGEDATA optional_if_exists_clause table_name 
+                        {
+                          $$ = new(PARSERHEAP()) 
+                            PtrPlaceHolder($3, 
+                                           ($2 ? new(PARSERHEAP()) NAString() 
+                                            : NULL));
+                        }
+                        | TOK_TRUNCATE optional_if_exists_clause 
+                        {
+                          SqlParser_CurrentParser->hiveDDLInfo_->
+                            setValues(TRUE, StmtDDLonHiveObjects::TRUNCATE_, StmtDDLonHiveObjects::TABLE_, $2);
+                        }
+                        ddl_qualified_name
+                        {
+                          CorrName * cn = new(PARSERHEAP()) CorrName(*$4, PARSERHEAP());
+                          $$ = new(PARSERHEAP()) 
+                            PtrPlaceHolder(cn, 
+                                           ($2 ? new(PARSERHEAP()) NAString() 
+                                            : NULL));
+                        }
+                        | TOK_TRUNCATE TOK_TABLE optional_if_exists_clause 
+                        {
+                          SqlParser_CurrentParser->hiveDDLInfo_->
+                            setValues(TRUE, StmtDDLonHiveObjects::TRUNCATE_, StmtDDLonHiveObjects::TABLE_, $3);
+                        }
+                        ddl_qualified_name
+                        {
+                          CorrName * cn = new(PARSERHEAP()) CorrName(*$5, PARSERHEAP());
+                          $$ = new(PARSERHEAP()) 
+                            PtrPlaceHolder(cn, 
+                                           ($3 ? new(PARSERHEAP()) NAString() 
+                                            : NULL));
+                        }
+
+truncate_table :  truncate_table_name 
 		     {
-		       short noLog = ($3 & 0x1) != 0;
-		       short ignoreTrigger = ($3 & 0x2) != 0;
+                       PtrPlaceHolder *pph = $1;
 
 		       CharInfo::CharSet stmtCharSet = CharInfo::UnknownCharSet;
-		       NAString * stmt = getSqlStmtStr ( stmtCharSet  // out - CharInfo::CharSet &
-		                                       , PARSERHEAP() // in  - NAMemory * heapUsedForOutputBuffers
+		       NAString * stmt = getSqlStmtStr ( stmtCharSet
+		                                       , PARSERHEAP()
 		                                       );
-		       // If we can not get a variable-width multi-byte or single-byte string here, report error 
 		       if ( stmt == NULL )
 		       {
 		         *SqlParser_Diags <<  DgSqlCode(-3406);
 		         YYERROR;
 		       }
-		       $$ = new (PARSERHEAP())
-			 ExeUtilFastDelete(CorrName(*$2, PARSERHEAP()),
-					   NULL,
-					   (char*)stmt->data(),
-					   stmtCharSet,
-					   FALSE,
-					   noLog,
-					   ignoreTrigger,
-					   TRUE,
-					   PARSERHEAP());
-		       
-		       delete $2;
-		     }
+                       CorrName *cn = (CorrName*) pph->ptr1_;
+                       NABoolean ifExists = (pph->ptr2_ != NULL);
 
-purgedata_options : /*empty*/ { $$ = 0; }
-                  | TOK_NOLOG { $$ = 1; }
-                  | TOK_IGNORE_TRIGGER { $$ = 2; }
-                  | TOK_NOLOG TOK_IGNORE_TRIGGER { $$ = 3; }
-                  | TOK_IGNORE_TRIGGER TOK_NOLOG { $$ = 3; }
-                  | TOK_WAITEDIO { $$ = 4; }
-                  | TOK_NOLOG TOK_IGNORE_TRIGGER TOK_WAITEDIO { $$ = 7; }
-                  | TOK_IGNORE_TRIGGER TOK_NOLOG TOK_WAITEDIO { $$ = 7; }
-                  | TOK_WAITEDIO TOK_NOLOG TOK_IGNORE_TRIGGER { $$ = 7; }
-                  | TOK_WAITEDIO TOK_IGNORE_TRIGGER TOK_NOLOG { $$ = 7; }
-                  | TOK_NOLOG TOK_WAITEDIO TOK_IGNORE_TRIGGER { $$ = 7; }
-                  | TOK_IGNORE_TRIGGER TOK_WAITEDIO TOK_NOLOG { $$ = 7; }
-
-exe_util_hive_truncate:  TOK_TRUNCATE table_name 
-		     {
-		       $$ = new (PARSERHEAP())
-			 ExeUtilHiveTruncate(CorrName(*$2, PARSERHEAP()),
-                                             NULL,
-                                             PARSERHEAP());
-		       
-		       delete $2;
-		     }
-                     | TOK_TRUNCATE table_name TOK_PARTITION '(' quoted_string_list ')'
-		     {
-		       $$ = new (PARSERHEAP())
-			 ExeUtilHiveTruncate(CorrName(*$2, PARSERHEAP()),
-                                             $5,
-                                             PARSERHEAP());
-		       
-		       delete $2;
-		     }
+                       DDLExpr * ddlExpr = new(PARSERHEAP()) 
+                         DDLExpr(NULL,
+                                 (char*)stmt->data(),
+                                 CharInfo::UnknownCharSet,
+                                 CmpCommon::statementHeap());
+                       ddlExpr->setPurgedata(TRUE);
+                       ddlExpr->setPurgedataTableName(*cn);
+                       ddlExpr->setPurgedataIfExists(ifExists);
+                       
+                       $$ = ddlExpr;
+                     }
 
 exe_util_aqr: TOK_GET TOK_ALL TOK_AQR TOK_ENTRIES
                {
@@ -18840,7 +18952,7 @@ simple_table  : query_specification
 
 
 /* type relx */
-rel_subquery : '(' query_expression order_by_clause ')'
+rel_subquery : '(' query_expression order_by_clause optional_limit_spec ')'
 				{
                                   if (InIfCondition) {
                                      *SqlParser_Diags << DgSqlCode(-3176);
@@ -18868,10 +18980,29 @@ rel_subquery : '(' query_expression order_by_clause ')'
                                     }
 
                                   $$ = temp;
+                  if ($4)
+                    {
+                      RelExpr *query = $2;
+                      if (query->getFirstNRows() >= 0)
+                        {
+                          YYERROR;
+                        }
+                      else
+                        {
+                          NABoolean negate;
+                          if ($4->castToConstValue(negate))
+                            {
+                              ConstValue *limit = (ConstValue *)$4;
+                              Lng32 scale = 0;
+                              query->setFirstNRows(limit->getExactNumericValue(scale));
+                            }
+                        }
+                    }
 				}
 /* type item */
 predicate : directed_comparison_predicate
         | key_comparison_predicate
+        | overlaps_predicate 
 	  | between_predicate predicate_selectivity_hint 
           {
               if ($2)
@@ -19339,6 +19470,24 @@ exists_predicate : TOK_EXISTS rel_subquery
 				}
 
 /* type item */
+overlaps_predicate : value_expression_list_paren TOK_OVERLAPS value_expression_list_paren
+        {
+          ItemExprList  exprList1($1, PARSERHEAP());
+          ItemExprList  exprList2($3, PARSERHEAP());
+          //Syntax Rules:
+          //  1) The degrees of <row value predicand 1> and <row value predicand 2> shall both be 2.
+          if ((exprList1.entries() != 2)
+              || (exprList1.entries() != exprList2.entries()))
+          {
+             *SqlParser_Diags << DgSqlCode(-4077)
+                              << DgString0("OVERLAPS");
+             YYERROR; //CHANGE TO YYABORT
+          }
+
+          $$ = new (PARSERHEAP()) Overlaps((*$1)[0], (*$1)[1], (*$3)[0], (*$3)[1]);
+        }
+
+/* type item */
 search_condition : boolean_term
 				;
               | search_condition TOK_OR boolean_term
@@ -19579,10 +19728,10 @@ Rest_Of_insert_statement : no_check_log no_rollback TOK_INTO table_name query_ex
                $5);
           
           ((Insert*)$$)->setOverwriteHiveTable(TRUE);
-          
+
           delete $3;
         }  
-            
+
           | no_check_log no_rollback TOK_INTO  table_name '(' '*' ')' query_expression order_by_clause access_type optional_limit_spec
         {
           if (!finalizeAccessOptions($8, $10)) YYERROR;
@@ -20641,76 +20790,8 @@ delete_statement : delete_start_tokens where_clause
                                   }
 				}
 
-delete_statement : TOK_DELETE TOK_DATA TOK_FROM table_name 
-				{
-				  if (CmpCommon::getDefault(FAST_DELETE) == DF_OFF)
-				    {
-				      YYERROR;
-				    }
-				  
-				  CharInfo::CharSet stmtCharSet = CharInfo::UnknownCharSet;
-				  NAString * stmt = getSqlStmtStr ( stmtCharSet  // out - CharInfo::CharSet &
-				                                  , PARSERHEAP() // in  - NAMemory * heapUsedForOutputBuffers
-				                                  );
-				  // If we can not get a variable-width multi-byte or single-byte string here, report error 
-				  if ( stmt == NULL )
-				  {
-				    *SqlParser_Diags <<  DgSqlCode(-3406);
-				    YYERROR;
-				  }
-				  $$ = new (PARSERHEAP())
-				    ExeUtilFastDelete(CorrName(*$4, PARSERHEAP()),
-						      NULL,
-						      (char*)stmt->data(),
-						      stmtCharSet,
-						      FALSE,
-						      FALSE, FALSE,
-						      FALSE,
-						      PARSERHEAP());
-
-				  delete $4;
-				}
-
 /* type relx */
-delete_statement : TOK_DELETE TOK_USING TOK_PURGEDATA TOK_FROM table_name
-				{
-				  Scan * inputScan =
-				    new (PARSERHEAP()) Scan(CorrName(*$5, PARSERHEAP()));
-
-				  Delete *del = new (PARSERHEAP())
-				    Delete(CorrName(*$5, PARSERHEAP()),
-					   NULL,
-					   REL_UNARY_DELETE,
-					   inputScan,
-					   NULL);
-
-				  del->setIsFastDelete(TRUE);
-
-				  delete $5;
-
-				  $$ = del;
-				}
-
-                   | TOK_DELETE TOK_NO TOK_PURGEDATA TOK_FROM table_name
-				{
-				  Scan * inputScan =
-				    new (PARSERHEAP()) Scan(CorrName(*$5, PARSERHEAP()));
-
-				  Delete *del = new (PARSERHEAP())
-				    Delete(CorrName(*$5, PARSERHEAP()),
-					   NULL,
-					   REL_UNARY_DELETE,
-					   inputScan,
-					   NULL);
-
-				  del->setIsFastDelete(FALSE);
-				  del->setNoIMneeded(TRUE);
-
-				  delete $5;
-
-				  $$ = del;
-				}
-		| TOK_DELETE no_check_log TOK_WITH TOK_NO TOK_ROLLBACK TOK_FROM table_name optimizer_hint where_clause 
+delete_statement : TOK_DELETE no_check_log TOK_WITH TOK_NO TOK_ROLLBACK TOK_FROM table_name optimizer_hint where_clause 
                 {
                   Scan * inputScan =
                     new (PARSERHEAP()) Scan(CorrName(*$7, PARSERHEAP()));
@@ -21836,6 +21917,11 @@ query_shape_control : shape_identifier
 				    {
 				      $$ = new (PARSERHEAP()) WildCardOp(REL_ANY_LEAF_TABLE_MAPPING_UDF);
 				    }
+				  else if (*$1 == "FAST_EXTRACT" ||
+                                           *$1 == "HIVE_INSERT")
+				    {
+				      $$ = new (PARSERHEAP()) WildCardOp(REL_ANY_EXTRACT);
+				    }
 				  else if (*$1 == "FORWARD")
 				    {
 				      $$ = new (PARSERHEAP()) ScanForceWildCard();
@@ -22586,19 +22672,24 @@ showcontrol_type:
           | TOK_TABLE			{ $$ = Describe::CONTROL_TABLE_; }
           | TOK_SESSION			{ $$ = Describe::CONTROL_SESSION_; }
 
-/*showleaks process*/
-showleaks_process:
-	    TOK_ARKCMP                  { $$ = LeakDescribe::FLAG_ARKCMP; }
-          | TOK_BOTH                    { $$ = LeakDescribe::FLAG_BOTH; }
-          |                             { $$ = LeakDescribe::FLAG_SQLCI; }  
+showplan_starting_tokens : TOK_SHOWPLAN showplan_options
+                           {
+                             SqlParser_CurrentParser->hiveDDLInfo_->essd_ = Parser::HiveDDLInfo::SHOWPLAN_;
 
-/*session control*/
-showleaks_session:
-	    TOK_CONTINUE                { $$ = LeakDescribe::FLAG_CONTINUE; }
-          | TOK_OFF                     { $$ = LeakDescribe::FLAG_OFF; }
-          | TOK_PROMPT                  { $$ = LeakDescribe::FLAG_PROMPT; }
-	  |                             { $$ = 0; }
-	  
+                             char buf[40];
+                             SqlParser_CurrentParser->hiveDDLInfo_->essdQueryStartPos_ = 9;
+
+                             if ($2 != 0)
+                               {
+                                 SqlParser_CurrentParser->hiveDDLInfo_->essdOptions_ = 
+                                   str_itoa($2, buf);
+
+                                 SqlParser_CurrentParser->hiveDDLInfo_->essdQueryStartPos_ += strlen("option ") + strlen("'t'");
+                               }
+
+                             $$ = $2;
+                           }
+
 /* type relx */
 show_statement:
 	     TOK_SHOWCONTROL showcontrol_type 
@@ -22777,11 +22868,11 @@ show_statement:
 			 new (PARSERHEAP())
 			 ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
 	     }
-          | TOK_SHOWDDL TOK_USER authorization_identifier 
+          | TOK_SHOWDDL_USER authorization_identifier 
             {
               $$ = new (PARSERHEAP())
                 RelRoot(new (PARSERHEAP())
-                  Describe(SQLTEXT(), COM_USER_CLASS, *$3, Describe::SHOWDDL_),
+                  Describe(SQLTEXT(), COM_USER_CLASS, *$2, Describe::SHOWDDL_),
                   REL_ROOT,
                   new (PARSERHEAP())
                   ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP()))); 
@@ -22858,72 +22949,6 @@ show_statement:
                delete $3; // CorrName * actual_routine_name of UDF or UUDF
                delete $4; // CorrName * actual_routine_name of routine action
              }
-         | TOK_SHOWLABEL extended_label_name showlabel_options
-             {
-               // Determine the ANSI namespace.
-               ExtendedQualName::SpecialTableType stt = $2->getSpecialType();
-               ComAnsiNameSpace labelAnsiNameSpace = COM_UNKNOWN_NAME;
-               switch (stt) 
-               {
-               case ExtendedQualName::NORMAL_TABLE:
-                 labelAnsiNameSpace = COM_TABLE_NAME;
-                 break;
-               case ExtendedQualName::INDEX_TABLE:
-                 labelAnsiNameSpace = COM_INDEX_NAME;
-                 break;
-               case ExtendedQualName::GHOST_TABLE:
-                 labelAnsiNameSpace = COM_GHOST_TABLE_NAME;
-                 break;
-               case ExtendedQualName::GHOST_INDEX_TABLE:
-                 labelAnsiNameSpace = COM_GHOST_INDEX_NAME;
-                 break;
-               case ExtendedQualName::ISP_TABLE:
-                 labelAnsiNameSpace = COM_TABLE_NAME;
-                 break;
-               case ExtendedQualName::IUD_LOG_TABLE:
-                 labelAnsiNameSpace = COM_IUD_LOG_TABLE_NAME;
-                 break;
-               case ExtendedQualName::RANGE_LOG_TABLE:
-                 labelAnsiNameSpace = COM_RANGE_LOG_TABLE_NAME;
-                 break;
-               case ExtendedQualName::TRIGTEMP_TABLE:
-                 labelAnsiNameSpace = COM_TRIGTEMP_TABLE_NAME;
-                 break;
-               default :
-                 // There should be a case for every special type that
-                 // is specified by the production extended_label_name.
-                 ABORT("internal logic error");
-                 break;
-               }
-
-	       $$ = new (PARSERHEAP())
-		 RelRoot(new (PARSERHEAP())
-			 Describe(SQLTEXT(),
-				  *$2/*label_name*/,
-				  Describe::LABEL_,
-				  labelAnsiNameSpace,
-				  $3 /*showlabel_options*/),
-			 REL_ROOT,	
-			 new (PARSERHEAP())
-			 ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
-	     }
-  //ACH        TOK_SHOWLIBRARY label_name 
-             
-	  | TOK_SHOWLEAKS showleaks_process showleaks_session
-	     {
-	       HEAPLOG_CONTROL(LOG_DELETE_ONLY);  
-	       CorrName c;
-	       $$ = new (PARSERHEAP())
-		 RelRoot(new (PARSERHEAP())
-			 Describe(SQLTEXT(),
-				  c,
-				  Describe::LEAKS_,
-				  COM_TABLE_NAME,
-				  ($2 | $3)),
-			 REL_ROOT,	
-			 new (PARSERHEAP())
-			 ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
-	     }  
 	   | TOK_INVOKE table_name
 	     {
 	       $$ = new (PARSERHEAP())
@@ -22977,7 +23002,7 @@ show_statement:
 		 YYERROR;
 	       }
 	     }
-	  | TOK_SHOWPLAN options interactive_query_expression
+	  | showplan_starting_tokens interactive_query_expression
 	     {
 	       // create a dummy name so as to satisfy the constructor of
 	       // Describe. The tablename param is not used for SHOWPLAN qry.
@@ -22985,13 +23010,14 @@ show_statement:
 
 	       $$ = new (PARSERHEAP())
 		 RelRoot(new (PARSERHEAP())
-		   Describe(SQLTEXT(), c, Describe::PLAN_,COM_TABLE_NAME,$2),
+		   Describe(SQLTEXT(), c, Describe::PLAN_,COM_TABLE_NAME,$1),
 			    REL_ROOT,	
 			    new (PARSERHEAP())
 			      ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
+
 	     }
 
-	  | TOK_SHOWPLAN options TOK_EXPLAIN optional_options interactive_query_expression
+	  | showplan_starting_tokens TOK_EXPLAIN optional_options interactive_query_expression
 	     {
 	       // create a dummy name so as to satisfy the constructor of
 	       // Describe. The tablename param is not used for SHOWPLAN qry.
@@ -22999,13 +23025,15 @@ show_statement:
 
 	       $$ = new (PARSERHEAP())
 		 RelRoot(new (PARSERHEAP())
-		   Describe(SQLTEXT(), c, Describe::PLAN_,COM_TABLE_NAME,$2),
+		   Describe(SQLTEXT(), c, Describe::PLAN_,COM_TABLE_NAME,$1),
 			    REL_ROOT,	
 			    new (PARSERHEAP())
 			      ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
+
+               SqlParser_CurrentParser->hiveDDLInfo_->essd_ = Parser::HiveDDLInfo::SHOWPLAN_;
 	     }
 
-	  | TOK_SHOWPLAN options TOK_PROCEDURE '(' character_string_literal ',' character_string_literal ')'
+	  | showplan_starting_tokens TOK_PROCEDURE '(' character_string_literal ',' character_string_literal ')'
 	     {
                // DEFAULT_CHARSET has no effect on character_string_literal in this context
                //
@@ -23017,16 +23045,20 @@ show_statement:
 	       //temp.append('.');
 	       //temp.append(*$6);
 
-	       CorrName c (*$7, NULL, *$5);
+	       CorrName c (*$6, NULL, *$4);
 	       $$ = new (PARSERHEAP())
 		 RelRoot(new (PARSERHEAP())
-		   Describe(SQLTEXT(), c, Describe::STATIC_PLAN_,COM_TABLE_NAME,$2),
+		   Describe(SQLTEXT(), c, Describe::STATIC_PLAN_,COM_TABLE_NAME,$1),
 			    REL_ROOT,	
 			    new (PARSERHEAP())
 			      ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
 	     }
 
-	  | TOK_SHOWSHAPE interactive_query_expression
+	  | TOK_SHOWSHAPE 
+            {
+              SqlParser_CurrentParser->hiveDDLInfo_->essd_ = Parser::HiveDDLInfo::SHOWSHAPE_;
+            }
+            interactive_query_expression
 	     {
 	       // create a dummy name so as to satisfy the constructor of
 	       // Describe. The tablename param is not used for SHOWPLAN qry.
@@ -23038,6 +23070,7 @@ show_statement:
 			    REL_ROOT,	
 			    new (PARSERHEAP())
 			      ColReference(new (PARSERHEAP()) ColRefName(TRUE, PARSERHEAP())));
+
 	     }
        | TOK_SHOWSTATS TOK_FOR TOK_QUERY query_expression
          {
@@ -23430,12 +23463,20 @@ set_table_statement: TOK_SET TOK_TABLE set_table_name
                    {
 		     $$ = new (PARSERHEAP())   // a RESET 
 		       RelSetTimeout( *$3, NULL, $4, TRUE );
+                     *SqlParser_Diags << DgSqlCode(-4222)
+                                      << DgString0("SET TABLE TIMEOUT");
+                     yyerror("");
+                     YYABORT;
 		   }
                   |  TOK_SET TOK_TABLE set_table_name  // a timeout value
                      optional_stream TOK_TIMEOUT  timeout_value
                    {
 		     $$ = new (PARSERHEAP()) 
 		       RelSetTimeout( *$3, (ItemExpr *) $6 , $4);
+                     *SqlParser_Diags << DgSqlCode(-4222)
+                                      << DgString0("SET TABLE TIMEOUT");
+                     yyerror("");
+                     YYABORT;
 		   }
                      
 
@@ -23842,7 +23883,6 @@ optional_showddl_object_options_list : empty
              // include EXTERNAL(32)/INTERNAL(64), unsupported options
              // include BRIEF(8)/DETAIL(4).
              if ( (($2 & 32) && ($2 & 64)) ||
-                  ($2 & 4) || 
                   ($2 & 8) )
              {
                  yyerror("");        // emits syntax error 15001
@@ -23864,109 +23904,26 @@ optional_showddl_role_option : empty
              $$ = 16;
            }
 
-/* type longint */
-showlabel_options : empty
-           {
-              $$ = 0;
-           }
-     |  ',' TOK_DETAIL
-           {
-             $$ = 1;
-           }
-     |  ',' TOK_DETAIL ',' TOK_PRIVILEGES
-           {
-             $$ = 17;
-           }
-     |  ',' TOK_PRIVILEGES ',' TOK_DETAIL
-           {
-             $$ = 17;
-           }
-     |  ',' TOK_PRIVILEGES
-           {
-             $$ = 16;
-           }
-
-/* type corrName */
-// With the introduction of ghost objects we now use extended_label_name 
-// where we used to use two productions: optional_ansi_name_space label_name
-// Two productions is neater, but we do this to avoid introducing a 
-// shift/reduce conflict.
-extended_label_name : label_name
-           {
-             $$ = $1 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::NORMAL_TABLE);
-           }
-
-     |  TOK_INDEX label_name
-           {
-             $$ = $2 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::INDEX_TABLE);
-           }
-
-     |  TOK_TABLE label_name
-           {
-             $$ = $2 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::NORMAL_TABLE);
-           }
-
-     |  ghost TOK_INDEX label_name
-           {
-             $$ = $3 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::GHOST_INDEX_TABLE);
-           }
-  
-     |  ghost TOK_TABLE label_name
-           {
-             $$ = $3 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::GHOST_TABLE);
-           }
-  
-     |  TOK_PROCEDURE label_name
-           {
-             $$ = $2 /* label_name */;
-             $$->setSpecialType(ExtendedQualName::ISP_TABLE);
-           }
-     |  TOK_IUDLOG TOK_TABLE label_name
-           {
-              if (Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE))
-              {
-                 $$ = $3 /* label_name */;
-                 $$->setSpecialType(ExtendedQualName::IUD_LOG_TABLE);
-              }
-              else
-              { 
-                 yyerror(""); YYERROR; /*internal syntax only!*/
-              }
-           }
-     |  TOK_RANGELOG TOK_TABLE label_name
-           {
-              if (Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE))
-              {
-                 $$ = $3 /* label_name */;
-                 $$->setSpecialType(ExtendedQualName::RANGE_LOG_TABLE);
-              }
-              else
-              { 
-                 yyerror(""); YYERROR; /*internal syntax only!*/
-              }
-           }
-     |  TOK_TEMP_TABLE TOK_TABLE label_name
-           {
-              if (Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE))
-              {
-                 $$ = $3 /* label_name */;
-                 $$->setSpecialType(ExtendedQualName::TRIGTEMP_TABLE);
-              }
-              else
-              { 
-                 yyerror(""); YYERROR; /*internal syntax only!*/
-              }
-           }
+/* type uint */
+schema_or_database : TOK_SCHEMA
+                     {
+                       $$ = 1;
+                     }
+                     | TOK_DATABASE
+                     {
+                       $$ = 2;
+                     }
 
 /* type pStmtDDL */
-
-schema_definition : TOK_CREATE schema_class TOK_SCHEMA schema_name_clause char_set collation_option
+schema_definition : TOK_CREATE schema_class schema_or_database schema_name_clause char_set collation_option
                     {
+                      // cannot use keyword DATABASE if not hive ddl.
+                      if (($3 == 2) &&
+                          (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                        {
+                          YYERROR;
+                        }
+
                       NAString extSchName($4->getSchemaName().getSchemaNameAsAnsiString());
                       if (! validateVolatileSchemaName(extSchName))
                       {
@@ -23988,9 +23945,16 @@ schema_definition : TOK_CREATE schema_class TOK_SCHEMA schema_name_clause char_s
                      delete $4 /*schema_name_clause*/;
                    }
 
-schema_definition : TOK_CREATE schema_class TOK_SCHEMA TOK_IF TOK_NOT TOK_EXISTS 
+schema_definition : TOK_CREATE schema_class schema_or_database TOK_IF TOK_NOT TOK_EXISTS 
                     schema_name_clause char_set collation_option
                     {
+                     // cannot use keyword DATABASE if not hive ddl.
+                      if (($3 == 2) &&
+                          (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                        {
+                          YYERROR;
+                        }
+
                       NAString extSchName($7->getSchemaName().getSchemaNameAsAnsiString());
                       if (! validateVolatileSchemaName(extSchName))
                       {
@@ -24010,6 +23974,9 @@ schema_definition : TOK_CREATE schema_class TOK_SCHEMA TOK_IF TOK_NOT TOK_EXISTS
                       pNode->setCreateIfNotExists(TRUE);
                       pNode->synthesize();
                       delete $7 /*schema_name_clause*/;
+
+                      SqlParser_CurrentParser->hiveDDLInfo_->ifExistsOrNotExists_ = TRUE;
+
                       $$ = pNode;
                     }
 
@@ -24038,6 +24005,9 @@ schema_definition : TOK_CREATE TOK_VOLATILE TOK_SCHEMA
 schema_class : empty
                                 { 
                                   $$ = COM_SCHEMA_CLASS_DEFAULT;
+
+                                  SqlParser_CurrentParser->hiveDDLInfo_->
+                                    setValues(TRUE, StmtDDLonHiveObjects::CREATE_, StmtDDLonHiveObjects::SCHEMA_);
                                 }
                               | TOK_PRIVATE
                                 {
@@ -24049,10 +24019,11 @@ schema_class : empty
                                 }
 
 /* type pElemDDLSchemaName */
-schema_name_clause: schema_name
+schema_name_clause : schema_name
                                 {
 				  $$ = new (PARSERHEAP())
 				    ElemDDLSchemaName(*$1, "", PARSERHEAP());
+
                                   delete $1;
                                 }
 
@@ -24072,18 +24043,39 @@ schema_name_clause: schema_name
                                 }
 
 /* type pSchemaName */
-schema_name : identifier '.' identifier
-                   		{
-                                    $$ = new (PARSERHEAP()) SchemaName(*$3,*$1, PARSERHEAP());
-                                    delete $3;
-                                    delete $1;
-		   		}
+schema_name : schema_name_ss
+              {
+                StringPos namePos = $1->getPosition();
+                size_t nameLen = $1->getNameLength();
+                $$ = schemaNameFromStrings($1);
+                if ($$ == NULL) 
+                  YYABORT;
 
-		      | identifier
-                                {
-                                  $$ = new (PARSERHEAP()) SchemaName(*$1,"",PARSERHEAP());
-                                  delete $1;
-                                }
+                SqlParser_CurrentParser->hiveDDLInfo_->ddlNamePos_ = namePos;
+                SqlParser_CurrentParser->hiveDDLInfo_->ddlNameLen_ = nameLen;
+
+                preprocessHiveDDL(
+                     $$->getCatalogName(), 
+                     SqlParser_CurrentParser->hiveDDLInfo_);  
+              }
+
+/* type strSeq */
+schema_name_ss : identifier
+                 {
+                   ShortStringSequence *strseq =
+                     new (PARSERHEAP()) ShortStringSequence($1);
+                   if (! strseq->isValid()) 
+                     YYABORT;
+                   $$ = strseq;
+                 }
+                | schema_name_ss '.' identifier
+                 {
+                   $1->append($3);
+                   if (! $1->isValid()) 
+                     YYABORT;
+                   
+                   $$ = $1;
+                 }
 
 /* type stringval */
 schema_authorization_identifier : authorization_identifier
@@ -25099,8 +25091,18 @@ udf_version_tag_clause : TOK_VERSION TOK_TAG std_char_string_literal
     delete $3; // std_char_string_literal
   }
 
+optional_hive_options : empty 
+                      {
+                        $$ = NULL;
+                      }
+                      | TOK_HIVE TOK_OPTIONS QUOTED_STRING
+                      {
+                        $$ = $3;
+                      }
+
 /* type pStmtDDL */
-table_definition : create_table_start_tokens ddl_qualified_name
+table_definition : create_table_start_tokens 
+                        ddl_qualified_name 
                         table_definition_body
                         optional_create_table_attribute_list
                         optional_in_memory_clause
@@ -25142,10 +25144,9 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     StmtDDLCreateTable *pNode =
 		       new (PARSERHEAP())
 		       StmtDDLCreateTable(
-			    *qn /*ddl_qualified_name*/,
-			    $3 /*table_definition_body*/,
-			    $4 /*optional_create_table_
-				*attribute_list*/,
+			    *qn, //ddl_qualified_name
+			    $3,  //table_definition_body
+			    $4,  //optional_create_table_attribute_list
 			    NULL,
 			    NULL,
 			    PARSERHEAP());
@@ -25170,12 +25171,13 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		       }
 
 		     $$ = pNode;
-                     delete $1; /*TableTokens*/
-		     delete $2 /*ddl_qualified_name*/;
+                     delete $1; //TableTokens
+		     delete $2; //ddl_qualified_name
 		   }
 
-table_definition : create_table_start_tokens ddl_qualified_name
-                        like_definition
+table_definition : create_table_start_tokens 
+                   ddl_qualified_name
+                   like_definition
 	  	   {
                      $1->setOptions(TableTokens::OPT_NONE);
 		     QualifiedName * qn;
@@ -25189,8 +25191,8 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     StmtDDLCreateTable *pNode =
 		       new (PARSERHEAP())
 		       StmtDDLCreateTable(
-			    *qn /*ddl_qualified_name*/,
-			    $3 /*like_definition*/,
+			    *qn, //ddl_qualified_name
+			    $3,  //like_definition
 			    NULL,
 			    NULL,
 			    NULL,
@@ -25206,8 +25208,8 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		       }
 
 		     $$ = pNode;
-                     delete $1; /*TableTokens*/
-		     delete $2 /*ddl_qualified_name*/;
+                     delete $1; //TableTokens
+		     delete $2; //ddl_qualified_name
 		   }
 
 		 | TOK_CREATE special_table_name
@@ -25238,13 +25240,18 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		   }
 
                  | create_table_start_tokens
-                   ddl_qualified_name 
-		   table_definition_body
-		   optional_create_table_attribute_list 
-		   create_table_as_attr_list_end
+                   ddl_qualified_name
+ 		   table_definition_body
+ 		   optional_create_table_attribute_list 
+ 		   create_table_as_attr_list_end
 		   ctas_load_and_in_memory_options
 		   ctas_insert_columns
+                   optional_hive_options
 		   create_table_as_token 
+                   {
+                     if (CmpCommon::getDefault(HIVE_CTAS_IN_NATIVE_MODE) == DF_OFF)
+                       SqlParser_CurrentParser->hiveDDLInfo_->setFoundDDL(FALSE);                       
+                   }
 		   optional_locking_stmt_list 
                    query_expression 
                    optional_limit_spec
@@ -25257,6 +25264,7 @@ table_definition : create_table_start_tokens ddl_qualified_name
 			 yyerror("");
 			 YYERROR;
 		       }
+
                      $1->setOptions($6);
                      if ($1->isVolatile())
                        qn = processVolatileDDLName($2, FALSE, FALSE);
@@ -25265,9 +25273,9 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     if (! qn)
 			 YYABORT;
 
-		     RelRoot *top = finalize($10);
+		     RelRoot *top = finalize($12);
                    //limit clause
-                   if ($11)
+                   if ($13)
                    {
                      if (top->getFirstNRows() >= 0)
                        {
@@ -25277,16 +25285,16 @@ table_definition : create_table_start_tokens ddl_qualified_name
                      else
                        {
                          NABoolean negate;
-                         if ($11->castToConstValue(negate))
+                         if ($13->castToConstValue(negate))
                            {
-                             ConstValue * limit = (ConstValue*)$11;
+                             ConstValue * limit = (ConstValue*)$13;
                              Lng32 scale = 0;
                              top->setFirstNRows(limit->getExactNumericValue(scale));
                              top->setFirstNRowsParam(NULL);
                            }
                          else
                            {
-                             top->setFirstNRowsParam($11);
+                             top->setFirstNRowsParam($13);
                              top->setFirstNRows(-1);
                            }
                        }
@@ -25295,11 +25303,10 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     StmtDDLCreateTable *pNode =
 		       new (PARSERHEAP())
 		       StmtDDLCreateTable(
-			    *qn /*ddl_qualified_name*/,
-			    $3 /*table_definition_body*/,
-			    $4 /*optional_create_table_
-				*attribute_list*/,
-			    $7, /* insert column list */
+			    *qn, //ddl_qualified_name
+			    $3,  // table_definition_body
+			    $4,  // optional_create_table_attribute_list
+			    $7,  // insert column list 
 			    top,
 			    PARSERHEAP());
                      $1->setTableTokens(pNode);
@@ -25316,18 +25323,26 @@ table_definition : create_table_start_tokens ddl_qualified_name
 			 delete ParNameCTLocListPtr;
 			 ParNameCTLocListPtr = NULL;
 		       }
-		     
+
+                     if ($8)
+                       pNode->setHiveOptions(*$8);
+
 		     $$ = pNode;
-                     delete $1; /*TableTokens*/
-		     delete $2 /*ddl_qualified_name*/;
+                     delete $1; //TableTokens
+		     delete $2; //ddl_qualified_name
 		   }
 
                  | create_table_start_tokens 
                    ddl_qualified_name 
+                   {
+                     if (CmpCommon::getDefault(HIVE_CTAS_IN_NATIVE_MODE) == DF_OFF)
+                       SqlParser_CurrentParser->hiveDDLInfo_->setFoundDDL(FALSE);                       
+                   }
 		   optional_create_table_attribute_list 
 		   create_table_as_attr_list_end
 		   ctas_load_and_in_memory_options
 		   ctas_insert_columns
+                   optional_hive_options
 		   create_table_as_token 
 		   optional_locking_stmt_list 
                    query_expression 
@@ -25341,7 +25356,8 @@ table_definition : create_table_start_tokens ddl_qualified_name
 			 yyerror("");
 			 YYERROR;
 		       }
-                     $1->setOptions($5);
+
+                     $1->setOptions($6);
                      if ($1->isVolatile())
                        qn = processVolatileDDLName($2, FALSE, FALSE);
 		     else
@@ -25349,9 +25365,9 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     if (! qn)
                        YYABORT;
 
-		     RelRoot *top = finalize($9);
+		     RelRoot *top = finalize($11);
                    //limit clause
-                   if ($10)
+                   if ($12)
                    {
                      if (top->getFirstNRows() >= 0)
                        {
@@ -25361,16 +25377,16 @@ table_definition : create_table_start_tokens ddl_qualified_name
                      else
                        {
                          NABoolean negate;
-                         if ($10->castToConstValue(negate))
+                         if ($12->castToConstValue(negate))
                            {
-                             ConstValue * limit = (ConstValue*)$10;
+                             ConstValue * limit = (ConstValue*)$12;
                              Lng32 scale = 0;
                              top->setFirstNRows(limit->getExactNumericValue(scale));
                              top->setFirstNRowsParam(NULL);
                            }
                          else
                            {
-                             top->setFirstNRowsParam($10);
+                             top->setFirstNRowsParam($12);
                              top->setFirstNRows(-1);
                            }
                        }
@@ -25379,11 +25395,10 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		     StmtDDLCreateTable *pNode =
 		       new (PARSERHEAP())
 		       StmtDDLCreateTable(
-			    *qn /*ddl_qualified_name*/,
-			    NULL /*table_definition_body*/,
-			    $3 /*optional_create_table_
-				*attribute_list*/,
-			    $6, /* insert column list */
+			    *qn,  //ddl_qualified_name
+			    NULL, //table_definition_body
+			    $4,   //optional_create_table_attribute_list
+			    $7,   //insert column list 
 			    top,
 			    PARSERHEAP());
                      $1->setTableTokens(pNode);
@@ -25401,9 +25416,12 @@ table_definition : create_table_start_tokens ddl_qualified_name
 			 ParNameCTLocListPtr = NULL;
 		       }
 
+                     if ($8)
+                       pNode->setHiveOptions(*$8);
+
 		     $$ = pNode;
-                     delete $1; /*TableTokens*/
-		     delete $2 /*ddl_qualified_name*/;
+                     delete $1; //TableTokens
+		     delete $2;  //ddl_qualified_name
 		   }
 
               | TOK_CREATE TOK_HBASE TOK_TABLE identifier '(' col_fam_quoted_string_list ')'
@@ -25435,6 +25453,7 @@ table_definition : create_table_start_tokens ddl_qualified_name
 		 $$ = pNode;
                }
 
+/* tableTokens */
 create_table_start_tokens : 
                    TOK_CREATE TOK_TABLE optional_if_not_exists_clause
                    {
@@ -25442,6 +25461,9 @@ create_table_start_tokens :
 		       ParNameLocList(SQLTEXT(), (CharInfo::CharSet)SQLTEXTCHARSET(), SQLTEXTW(), PARSERHEAP());
                      TableTokens *tableTokens = new TableTokens(TableTokens::TYPE_REGULAR_TABLE, $3); 
                      $$ = tableTokens;
+
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::CREATE_, StmtDDLonHiveObjects::TABLE_, $3);
 		   }
 
                    | TOK_CREATE TOK_EXTERNAL TOK_TABLE optional_if_not_exists_clause
@@ -25450,6 +25472,9 @@ create_table_start_tokens :
 		       ParNameLocList(SQLTEXT(), (CharInfo::CharSet)SQLTEXTCHARSET(), SQLTEXTW(), PARSERHEAP());
                      TableTokens *tableTokens = new TableTokens(TableTokens::TYPE_EXTERNAL_TABLE, $4); 
                      $$ = tableTokens;
+
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::CREATE_, StmtDDLonHiveObjects::TABLE_, $4);
 		   }
 
                    | TOK_CREATE TOK_IMPLICIT TOK_EXTERNAL TOK_TABLE optional_if_not_exists_clause
@@ -25568,6 +25593,36 @@ optional_if_exists_clause :
                $$ = TRUE;
              }
 
+/* type boolean */
+optional_if_not_registered_clause : 
+                empty
+                  {
+                    $$ = FALSE;
+                  }
+               | TOK_IF TOK_NOT TOK_REGISTERED
+                  {
+                    $$ = TRUE;
+                  }
+               | TOK_IF TOK_NOT TOK_EXISTS
+                  {
+                    $$ = TRUE;
+                  }
+
+/* type boolean */
+optional_if_registered_clause :
+          empty
+            {
+               $$ = FALSE;
+             }
+          | TOK_IF TOK_REGISTERED
+             {
+               $$ = TRUE;
+             }
+          | TOK_IF TOK_EXISTS
+             {
+               $$ = TRUE;
+             }
+
 
 create_table_as_attr_list_start: empty
 	           {
@@ -25598,7 +25653,11 @@ ctas_load_and_in_memory_options : TOK_LOAD TOK_IF TOK_EXISTS
                    {
 		     $$ = TableTokens::OPT_IN_MEM; 
 		   }
-                 | TOK_LOAD TOK_IF TOK_EXISTS TOK_WITH TOK_DELETE TOK_DATA 
+                 | TOK_LOAD TOK_IF TOK_EXISTS TOK_WITH TOK_TRUNCATE
+                   {
+		     $$ = TableTokens::OPT_LOAD_WITH_DELETE; 
+		   }
+                 | TOK_LOAD TOK_IF TOK_EXISTS TOK_WITH TOK_DELETE TOK_DATA
                    {
 		     $$ = TableTokens::OPT_LOAD_WITH_DELETE; 
 		   }
@@ -25952,7 +26011,7 @@ column_constraint :  TOK_NOT TOK_NULL
 			          NonISO88591LiteralEncountered = FALSE;
                                   $$ = new (PARSERHEAP()) ElemDDLConstraintNotNull(TRUE, PARSERHEAP());
                                 }
-                            |  TOK_NOT TOK_NULL TOK_ENABLE
+                     |  TOK_NOT TOK_NULL TOK_ENABLE
                                 {
 			          NonISO88591LiteralEncountered = FALSE;
                                   $$ = new (PARSERHEAP()) ElemDDLConstraintNotNull(TRUE, PARSERHEAP());
@@ -26024,16 +26083,20 @@ ddl_ordering_spec : TOK_ASC
 
 /* type pElemDDLConstraintUnique */
 column_unique_specification : unique_constraint_specification
-                      | TOK_PRIMARY TOK_KEY
+                      | TOK_PRIMARY TOK_KEY optional_nullable_pkey
                                 {
-                                  $$ = new (PARSERHEAP()) ElemDDLConstraintPKColumn();
+                                  $$ = new (PARSERHEAP()) 
+                                    ElemDDLConstraintPKColumn(
+                                         COM_ASCENDING_ORDER, 
+                                         $3 /*isNullable*/);
                                 }
 
-                      | TOK_PRIMARY TOK_KEY ddl_ordering_spec
+                      | TOK_PRIMARY TOK_KEY optional_nullable_pkey ddl_ordering_spec
                                 {
                                   $$ = new (PARSERHEAP())
 				    ElemDDLConstraintPKColumn(
-                                       $3 /*ddl_ordering_spec*/);
+                                         $4 /*ddl_ordering_spec*/,
+                                         $3 /*isNullable*/);
                                 }
 
 /* type pElemDDLConstraintUnique */
@@ -26044,20 +26107,23 @@ unique_constraint_specification : TOK_UNIQUE
 
 /* type pElemDDLConstraintUnique */
 unique_specification : unique_constraint_specification
-                      | TOK_PRIMARY TOK_KEY
+                      | TOK_PRIMARY TOK_KEY optional_nullable_pkey
                                 {
                                   $$ = new (PARSERHEAP()) 
-                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_SER_NOT_SPECIFIED);
+                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_SER_NOT_SPECIFIED,
+                                                        $3);
                                 }
-                      | TOK_PRIMARY TOK_KEY TOK_SERIALIZED
+                      | TOK_PRIMARY TOK_KEY optional_nullable_pkey TOK_SERIALIZED
                                 {
                                   $$ = new (PARSERHEAP()) 
-                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_SERIALIZED);
+                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_SERIALIZED,
+                                                        $3);
                                 }
-                      | TOK_PRIMARY TOK_KEY TOK_NOT TOK_SERIALIZED
+                      | TOK_PRIMARY TOK_KEY optional_nullable_pkey TOK_NOT TOK_SERIALIZED
                                 {
                                   $$ = new (PARSERHEAP()) 
-                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_NOT_SERIALIZED);
+                                    ElemDDLConstraintPK(NULL, ComPkeySerialization::COM_NOT_SERIALIZED,
+                                                        $3);
                                 }
 
 /* type pElemDDLConstraint */
@@ -26493,6 +26559,15 @@ like_definition : TOK_LIKE source_table optional_like_option_list
 /* type pElemDDL */
 external_table_definition : TOK_FOR source_table
                                 {
+                                  if (SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_)
+                                    SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_ = FALSE;
+
+                                  if (SqlParser_CurrentParser->hiveDDLInfo_->backquotedDelimFound_)
+                                    { 
+                                      yyerror(""); 
+                                      YYERROR;
+                                    }
+
                                   $$ = new (PARSERHEAP())
 				    ElemDDLLikeCreateTable(
                                         *$2 /*source_table*/,
@@ -27813,7 +27888,9 @@ store_option : TOK_PRIMARY TOK_KEY
                                 }
 
 /* type pStmtDDL */
-view_definition : create_view_keywords ddl_qualified_name
+view_definition : create_view_keywords 
+                                optional_if_not_exists_clause 
+                                ddl_qualified_name
                                 optional_view_column_list
                                 optional_location_clause
                                 optional_by_auth_identifier
@@ -27822,14 +27899,14 @@ view_definition : create_view_keywords ddl_qualified_name
                                 order_by_clause
                                 optional_with_check_option
                                 {
-				  RelRoot *top = finalize($8);
-				  if (($9) &&
+				  RelRoot *top = finalize($9);
+				  if (($10) &&
 				      (CmpCommon::getDefault(ALLOW_ORDER_BY_IN_CREATE_VIEW) == DF_OFF))
 				    {
 				      YYERROR;
 				    }
 
-                                  top->addOrderByTree($9);
+                                  top->addOrderByTree($10);
 				  if ((top->accessOptions().userSpecified()) &&
 				      (CmpCommon::getDefault(ALLOW_ISOLATION_LEVEL_IN_CREATE_VIEW) == DF_OFF))
 				    {
@@ -27851,7 +27928,7 @@ view_definition : create_view_keywords ddl_qualified_name
                                    //But if internal CQD is set, it is allowed.
                                    if(CmpCommon::getDefault(ALLOW_FIRSTN_IN_SUBQUERIES) != DF_ON)
                                    {
-                                   if ($8->getFirstNRows() != -1)
+                                   if ($9->getFirstNRows() != -1)
                                    {
                                       *SqlParser_Diags << DgSqlCode(-4103);
                                        YYERROR;
@@ -27862,25 +27939,24 @@ view_definition : create_view_keywords ddl_qualified_name
 				  StmtDDLCreateView *pCreateViewParseNode
 				    = new (PARSERHEAP())
 				    StmtDDLCreateView(
-					 *$2 /*ddl_qualified_name*/,
+					 *$3 /*ddl_qualified_name*/,
 					 *ParNameLocListPtr,
 
-                                         $3 /*optional_view_column_list*/,
-                                         $4 /*optional_location_clause*/,
+                                         $4 /*optional_view_column_list*/,
+                                         $5 /*optional_location_clause*/,
                                          top,
-                                         $10 /*optional_with_check_option*/,
+                                         $11 /*optional_with_check_option*/,
                                          $1 /*optional_create_view_behavior_enum*/,
-                                         $5 /*optional_by_auth_identifier*/);
-                                  delete $2 /*ddl_qualified_name*/;
+                                         $6 /*optional_by_auth_identifier*/);
+
+                                  if ($2)
+                                    pCreateViewParseNode->setCreateIfNotExists(TRUE);
+
+                                  delete $3 /*ddl_qualified_name*/;
                                   pCreateViewParseNode->synthesize();
                                   if (ParSetTextEndPos(pCreateViewParseNode))
 				    { yyerror(""); YYERROR; }
                                   $$ = pCreateViewParseNode;
-                                  //
-                                  // ParNameLocListPtr is no longer needed.
-                                  //
-                                  delete ParNameLocListPtr;
-                                  ParNameLocListPtr = NULL;
                                 }
 
 /* type tokval */
@@ -27910,8 +27986,9 @@ create_view_keywords : TOK_CREATE TOK_VIEW
                                         ParNameLocListPtr);
                                   $$ = COM_CREATE_VIEW_BEHAVIOR;
 
+                                  SqlParser_CurrentParser->hiveDDLInfo_->
+                                    setValues(TRUE, StmtDDLonHiveObjects::CREATE_, StmtDDLonHiveObjects::VIEW_);
                                 }
- 
                      | TOK_CREATE TOK_SYSTEM TOK_VIEW
                                 {
                                   // see comment above
@@ -27974,24 +28051,33 @@ routine_action_qualified_name : routine_action_name
 
 /* type pQualName */
 ddl_qualified_name : qualified_name
-				{
-                                  // ddl_qualified_name :
-				  // helps with computing view text
-				  //
-				  ParInsertNameLoc($1->getPosition(),
-				     		   $1->getNameLength());
-				  //
-				  // note that qualifiedNameFromStrings()
-				  // contains code that deletes $1
-				  //
-				  $$ = qualifiedNameFromStrings($1);
-				  if ($$ == NULL) 
-				    YYABORT;
-				  
-				  $$ = processVolatileDDLName($$, FALSE, FALSE);
-				  if ($$ == NULL)
-				    YYABORT;
-				}
+		     {
+                       // ddl_qualified_name :
+                       // helps with computing view text
+                       //
+                       StringPos namePos = $1->getPosition();
+                       size_t nameLen = $1->getNameLength();
+                       ParInsertNameLoc(namePos, nameLen);
+                       
+                       //
+                       // note that qualifiedNameFromStrings()
+                       // contains code that deletes $1
+                       //
+                       $$ = qualifiedNameFromStrings($1);
+                       if ($$ == NULL) 
+                         YYABORT;
+                       
+                       $$ = processVolatileDDLName($$, FALSE, FALSE);
+                       if ($$ == NULL)
+                         YYABORT;
+                       
+                       SqlParser_CurrentParser->hiveDDLInfo_->ddlNamePos_ = namePos;
+                       SqlParser_CurrentParser->hiveDDLInfo_->ddlNameLen_ = nameLen;
+                     
+                       preprocessHiveDDL(
+                            $$->getCatalogName(), 
+                            SqlParser_CurrentParser->hiveDDLInfo_);  
+                     }
 
 /* type pQualName */
 volatile_ddl_qualified_name : qualified_name
@@ -29130,7 +29216,7 @@ triggered_after_action: empty   // Empty or any option not listed below
 		  if ($2 != TransMode::ACCESS_TYPE_NOT_SPECIFIED_)
 		    treeTopPtr->accessOptions().accessType() = $2;
 		}
-              | signal_statement 
+              | signal_statement
 		{
 		  $$ = finalize($1, FALSE);
 		}
@@ -30362,10 +30448,6 @@ cleanup_objects_statement : TOK_CLEANUP cleanup_object_identifier ddl_qualified_
                    ot = StmtDDLCleanupObjects::SCHEMA_PRIVATE_;
                  else if (*$2 == "SCHEMA_S")
                    ot = StmtDDLCleanupObjects::SCHEMA_SHARED_;
-                 else if (*$2 == "HIVE_TABLE")
-                   ot = StmtDDLCleanupObjects::HIVE_TABLE_;
-                 else if (*$2 == "HIVE_VIEW")
-                   ot = StmtDDLCleanupObjects::HIVE_VIEW_;
                  else if (*$2 == "HBASE_TABLE")
                    ot = StmtDDLCleanupObjects::HBASE_TABLE_;
                  else if (*$2 == "OBJECT")
@@ -30510,10 +30592,23 @@ drop_sequence_statement : TOK_DROP TOK_SEQUENCE ddl_qualified_name
 		      }
 
 /* type pStmtDDL */
-drop_schema_statement : TOK_DROP TOK_SCHEMA schema_name_clause optional_cleanup 
+drop_schema_statement : TOK_DROP schema_or_database
+                        {
+
+                          SqlParser_CurrentParser->hiveDDLInfo_->
+                            setValues(TRUE, StmtDDLonHiveObjects::DROP_, StmtDDLonHiveObjects::SCHEMA_);
+                        }
+                        schema_name_clause optional_cleanup 
                         optional_drop_behavior 
                                 {
-				  NAString extSchName($3->getSchemaName().getSchemaNameAsAnsiString());
+                                  // cannot use keyword DATABASE if not hive ddl.
+                                  if (($2 == 2) &&
+                                      (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                                    {
+                                      YYERROR;
+                                    }
+
+				  NAString extSchName($4->getSchemaName().getSchemaNameAsAnsiString());
 				  if (! validateVolatileSchemaName(extSchName))
 				    {
 				      YYERROR;
@@ -30521,17 +30616,29 @@ drop_schema_statement : TOK_DROP TOK_SCHEMA schema_name_clause optional_cleanup
 
 				  $$ = new (PARSERHEAP())
 				    StmtDDLDropSchema(
-                                        *$3 /*schema_name_clause*/,
-                                         $5 /*optional_drop_behavior*/,
-                                         $4 /*optional_cleanup*/,
+                                        *$4 /*schema_name_clause*/,
+                                         $6 /*optional_drop_behavior*/,
+                                         $5 /*optional_cleanup*/,
 					FALSE);
-                                  delete $3 /*schema_name*/;
+                                  delete $4 /*schema_name*/;
                                 }
 
-drop_schema_statement : TOK_DROP TOK_SCHEMA TOK_IF TOK_EXISTS schema_name_clause optional_cleanup
+drop_schema_statement : TOK_DROP schema_or_database TOK_IF TOK_EXISTS 
+                        {
+                          SqlParser_CurrentParser->hiveDDLInfo_->
+                            setValues(TRUE, StmtDDLonHiveObjects::DROP_, StmtDDLonHiveObjects::SCHEMA_, TRUE);
+                        }
+                        schema_name_clause optional_cleanup
                         optional_drop_behavior
                                 {
-                                  NAString extSchName($5->getSchemaName().getSchemaNameAsAnsiString());
+                                  // cannot use keyword DATABASE if not hive ddl.
+                                  if (($2 == 2) &&
+                                      (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                                    {
+                                      YYERROR;
+                                    }
+
+                                  NAString extSchName($6->getSchemaName().getSchemaNameAsAnsiString());
                                   if (! validateVolatileSchemaName(extSchName))
                                     {
                                       YYERROR;
@@ -30540,12 +30647,12 @@ drop_schema_statement : TOK_DROP TOK_SCHEMA TOK_IF TOK_EXISTS schema_name_clause
                                     StmtDDLDropSchema *pNode =
                                       new (PARSERHEAP())
                                       StmtDDLDropSchema(
-                                        *$5 /*schema_name_clause*/,
-                                         $7 /*optional_drop_behavior*/,
-                                         $6 /*optional_cleanup*/,
+                                        *$6 /*schema_name_clause*/,
+                                         $8 /*optional_drop_behavior*/,
+                                         $7 /*optional_cleanup*/,
                                         FALSE);
                                   pNode->setDropIfExists(TRUE); 
-                                  delete $5 /*schema_name*/;
+                                  delete $6 /*schema_name*/;
                                   $$ = pNode;
                                 }
 
@@ -31263,28 +31370,37 @@ alter_trigger_statement : TOK_ALTER TOK_TRIGGER enable_status
 			    delete $5;
 			  }
 
+/* type uint */
+alter_view_start_tokens : TOK_ALTER TOK_VIEW
+                   {
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::ALTER_, StmtDDLonHiveObjects::VIEW_);
+
+                     $$ = 0;
+                   }
 
 /* type pStmtDDL */
-alter_view_statement : TOK_ALTER TOK_VIEW ddl_qualified_name
-                                 TOK_RENAME TOK_TO identifier
+alter_view_statement : alter_view_start_tokens 
+                       ddl_qualified_name
+                       TOK_RENAME TOK_TO identifier
                           {
                             $$ = new (PARSERHEAP())StmtDDLAlterView
-                                     ( *$3 // ddl_qualified_name (old name)
-                                     , *$6 // identifier (new name)
+                                     ( *$2 // ddl_qualified_name (old name)
+                                     , *$5 // identifier (new name)
                                      );
-                            delete $3;  // ddl_qualified_name
-                            delete $6;  // identifier
+                            delete $2;  // ddl_qualified_name
+                            delete $5;  // identifier
                           }
-                     |  TOK_ALTER TOK_VIEW ddl_qualified_name
-                                 TOK_COMPILE optional_cascade 
+                     |  alter_view_start_tokens
+                        ddl_qualified_name
+                        TOK_COMPILE optional_cascade 
                           {
                             $$ = new (PARSERHEAP())StmtDDLAlterView
-                                     ( *$3 // ddl_qualified_name (view name to validate)
-                                     ,  $5 // cascade TRUE or FALSE 
+                                     ( *$2 // ddl_qualified_name (view name to validate)
+                                     ,  $4 // cascade TRUE or FALSE 
                                      );
-                            delete $3;  // ddl_qualified_name
+                            delete $2;  // ddl_qualified_name
                           }
-
 
 //----------------------------------------------------------------------------
 //++ MV
@@ -31499,18 +31615,42 @@ alter_catalog_statement: TOK_ALTER TOK_CATALOG sql_mx_catalog_name enable_status
 				       *$8);
                                 }
 
+alter_schema_start_tokens : TOK_ALTER schema_or_database
+                            {
+                              SqlParser_CurrentParser->hiveDDLInfo_->
+                                setValues(TRUE, StmtDDLonHiveObjects::ALTER_, StmtDDLonHiveObjects::SCHEMA_);
+
+                              $$ = $2;
+                            }
+
 /* type pStmtDDL */
-alter_schema_statement: TOK_ALTER TOK_SCHEMA schema_name_clause alter_stored_descriptor_option
+alter_schema_statement: alter_schema_start_tokens
+                        schema_name_clause alter_stored_descriptor_option
 			{
+                          // cannot use keyword DATABASE if not hive ddl.
+                          if (($1 == 2) &&
+                              (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                            {
+                              YYERROR;
+                            }
+
                           $$ = new (PARSERHEAP()) 
                             StmtDDLAlterSchema
-                            (*$3,
-                             (StmtDDLAlterTableStoredDesc::AlterStoredDescType)$4);
+                            (*$2,
+                             (StmtDDLAlterTableStoredDesc::AlterStoredDescType)$3);
 
                         }
-                     |  TOK_ALTER TOK_SCHEMA schema_name_clause TOK_DROP TOK_ALL TOK_TABLES
+                     |  alter_schema_start_tokens
+                        schema_name_clause TOK_DROP TOK_ALL TOK_TABLES
 			{
-                          NAString extSchName($3->getSchemaName().getSchemaNameAsAnsiString());
+                          // cannot use keyword DATABASE if not hive ddl.
+                          if (($1 == 2) &&
+                              (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                            {
+                              YYERROR;
+                            }
+
+                          NAString extSchName($2->getSchemaName().getSchemaNameAsAnsiString());
                           if (! validateVolatileSchemaName(extSchName))
                             {
                               YYERROR;
@@ -31518,15 +31658,23 @@ alter_schema_statement: TOK_ALTER TOK_SCHEMA schema_name_clause alter_stored_des
                           
                           $$ = new (PARSERHEAP())
                             StmtDDLDropSchema(
-                                 *$3 /*schema_name_clause*/,
+                                 *$2 /*schema_name_clause*/,
                                  COM_CASCADE_DROP_BEHAVIOR,
                                  FALSE /*optional_cleanup*/,
                                  TRUE);
-                          delete $3 /*schema_name*/;
+                          delete $2 /*schema_name*/;
                         }
-                     |  TOK_ALTER TOK_SCHEMA schema_name_clause TOK_RENAME TOK_TO identifier
+                     |  alter_schema_start_tokens
+                        schema_name_clause TOK_RENAME TOK_TO identifier
 			{
-                          NAString extSchName($3->getSchemaName().getSchemaNameAsAnsiString());
+                          // cannot use keyword DATABASE if not hive ddl.
+                          if (($1 == 2) &&
+                              (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_))
+                            {
+                              YYERROR;
+                            }
+
+                          NAString extSchName($2->getSchemaName().getSchemaNameAsAnsiString());
                           if (! validateVolatileSchemaName(extSchName))
                             {
                               YYERROR;
@@ -31534,12 +31682,12 @@ alter_schema_statement: TOK_ALTER TOK_SCHEMA schema_name_clause alter_stored_des
                           
                           $$ = new (PARSERHEAP())
                             StmtDDLAlterSchema(
-                                 *$3 /*schema_name_clause*/,
-                                 *$6);
-                          delete $3 /*schema_name*/;
-                          delete $6; // renamed schema
+                                 *$2 , //schema_name_clause
+                                 *$5);
+                          delete $2; // schema_name
+                          delete $5; // renamed schema
                         }
-                                
+
 /* type pStmtDDL */
 alter_library_statement : TOK_ALTER TOK_LIBRARY ddl_qualified_name 
                           TOK_FILE std_char_string_literal
@@ -31645,40 +31793,53 @@ drop_library_statement : TOK_DROP TOK_LIBRARY ddl_qualified_name optional_drop_b
                                   delete $3 /*ddl_qualified_name*/;
                                }
 
+/* type uint */
+alter_table_start_tokens : TOK_ALTER optional_ghost TOK_TABLE
+                   {
+                     if ($2)
+                       $$ = 1;
+                     else
+                       $$ = 0;
+
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::ALTER_, StmtDDLonHiveObjects::TABLE_);
+                   }
+
                           
 /* type pStmtDDL */
-alter_table_statement : TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
+alter_table_statement :  alter_table_start_tokens
+                                ddl_qualified_name
                                 alter_table_action 
                                 {
-                                  $$ = $5 /*alter_table_action*/;
-                                  if ($2) /*optional_ghost*/
+                                  $$ = $3 /*alter_table_action*/;
+                                  if ($1) /*optional_ghost*/
                                     $$->setIsGhostObject(TRUE);
                                   $$->castToStmtDDLAlterTable()->
-                                    setTableName(QualifiedName (*$4 /*ddl_qualified_name*/, 
+                                    setTableName(QualifiedName (*$2 /*ddl_qualified_name*/, 
                                                   PARSERHEAP()));
 				  if($$->castToStmtDDLAlterTableAddColumn())
                                     {
 				      $$->castToStmtDDLAlterTableAddColumn()->
 					synthesize();
                                     }
-                                  delete $4 /*ddl_qualified_name*/;
+                                  delete $2 /*ddl_qualified_name*/;
                                 }
-                       | TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
+                       | alter_table_start_tokens ddl_qualified_name
                                 is_not_droppable
                                 {
                                   StmtDDLAlterTable *pNode = new (PARSERHEAP())
 				                             StmtDDLAlterTable(DDL_ALTER_TABLE_DROPPABLE);
                                   pNode->setTableName(QualifiedName
-				                      (*$4 /*ddl_qualified_name*/,
+				                      (*$2 /*ddl_qualified_name*/,
 						       PARSERHEAP()));
 
-                                  pNode->setIsDroppable(!$5);
+                                  pNode->setIsDroppable(!$3);
                                   $$ = pNode;
-                                  delete $4 /*ddl_qualified_name*/;
-                                  if ($2) /*optional_ghost*/
+                                  delete $2 /*ddl_qualified_name*/;
+                                  if ($1) /*optional_ghost*/
                                     $$->setIsGhostObject(TRUE);
                                 }
-                       | TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
+                       | alter_table_start_tokens ddl_qualified_name
                                 TOK_INSERT_ONLY
                                 {
                                   if (CmpCommon::getDefault(CAT_ALLOW_NEW_FEATUREX) == DF_OFF)
@@ -31691,16 +31852,16 @@ alter_table_statement : TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
                                   StmtDDLAlterTable *pNode = new (PARSERHEAP())
                                                              StmtDDLAlterTable(DDL_ALTER_TABLE_INSERT_ONLY);
                                   pNode->setTableName(QualifiedName
-                                                      (*$4 /*ddl_qualified_name*/,
+                                                      (*$2 /*ddl_qualified_name*/,
                                                        PARSERHEAP()));
                                   pNode->setInsertOnly(TRUE);
                                   $$ = pNode;
-                                  delete $4 /*ddl_qualified_name*/;
-                                  if ($2) /*optional_ghost*/
+                                  delete $2 /*ddl_qualified_name*/;
+                                  if ($1) /*optional_ghost*/
                                     $$->setIsGhostObject(TRUE);
                                 }
 
-                     | TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name TOK_NAMESPACE 
+                     | alter_table_start_tokens ddl_qualified_name TOK_NAMESPACE 
 				{
                                   if ( ! Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE)
 		                       && ( CmpCommon::getDefault(ALLOW_GHOST_OBJECTS) == DF_OFF )
@@ -31712,37 +31873,35 @@ alter_table_statement : TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
                                   }
                                   $$ = new (PARSERHEAP())
                                     StmtDDLAlterTableNamespace
-                                      (*$4);
+                                      (*$2);
                                   $$->castToStmtDDLAlterTable()->
                                     setTableName(QualifiedName
-                                                 (*$4 /*ddl_qualified_name*/, 
+                                                 (*$2 /*ddl_qualified_name*/, 
                                                   PARSERHEAP()));
-  				  if($2)
+                                  if($1)
                                     $$->setIsGhostObject(TRUE);
  				  else
                                     $$->setIsGhostObject(FALSE);
-                                  delete $4; // identifier
+                                  delete $2; // identifier
 				}
 
-                       | TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name online_or_offline                      
+                       | alter_table_start_tokens ddl_qualified_name online_or_offline                      
                         {
                             StmtDDLAlterTable *pNode = new (PARSERHEAP())
 			                                    StmtDDLAlterTable(DDL_ALTER_TABLE_TOGGLE_ONLINE);
-                            pNode->setTableName(QualifiedName(*$4 , PARSERHEAP())); 
-                            pNode->setIsOnline($5);
+                            pNode->setTableName(QualifiedName(*$2 , PARSERHEAP())); 
+                            pNode->setIsOnline($3);
                             $$ = pNode;
-  		            if($2)
-                               $$->setIsGhostObject(TRUE);
+  		            if($1)
+                              $$->setIsGhostObject(TRUE);
  			    else
-                               $$->setIsGhostObject(FALSE);                            
-                            delete $4;
+                              $$->setIsGhostObject(FALSE);     
+                            delete $2;
                         }
-                       | TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name online_or_offline TOK_FOR TOK_PURGEDATA
+                       | alter_table_start_tokens ddl_qualified_name online_or_offline TOK_FOR TOK_PURGEDATA
                         {
 			  if ((NOT Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE)) ||
-			      //			      (NOT Get_SqlParser_Flags(INTERNAL_QUERY_FROM_EXEUTIL)) ||
-			      ($2))
-			      //(CmpCommon::getDefault(EXE_PARALLEL_PURGEDATA) == DF_OFF))
+                              ($2)) // ghost
 			    { 
 			      yyerror(""); 
 			      YYERROR; /*internal syntax only!*/
@@ -31750,12 +31909,12 @@ alter_table_statement : TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
 
 			  StmtDDLAlterTable *pNode = new (PARSERHEAP())
 			    StmtDDLAlterTable(DDL_ALTER_TABLE_TOGGLE_ONLINE);
-			  pNode->setTableName(QualifiedName(*$4 , PARSERHEAP())); 
-			  pNode->setIsOnline($5);
+			  pNode->setTableName(QualifiedName(*$2 , PARSERHEAP())); 
+			  pNode->setIsOnline($3);
 			  pNode->setForPurgedata(TRUE);
 			  $$ = pNode;
 			  $$->setIsGhostObject(FALSE);
-			  delete $4;
+			  delete $2;
                         }
                      | TOK_ALTER TOK_VOLATILE TOK_TABLE volatile_ddl_qualified_name
                                 alter_table_action
@@ -31769,6 +31928,41 @@ alter_table_statement : TOK_ALTER optional_ghost TOK_TABLE ddl_qualified_name
                                                   PARSERHEAP()));
                                   delete $4 /*ddl_qualified_name*/;
                                 }
+
+                     | TOK_MSCK
+                       { 
+                         // this is a Hive only syntax
+                         SqlParser_CurrentParser->hiveDDLInfo_->
+                           setValues(TRUE, StmtDDLonHiveObjects::MSCK_, 
+                                     StmtDDLonHiveObjects::TABLE_);
+                       }
+                       TOK_REPAIR TOK_TABLE ddl_qualified_name
+                       {
+                         if (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_)
+                           {
+                             *SqlParser_Diags << DgSqlCode(-3242)
+                                              << DgString0("Specified object must be a Hive object.");
+                           }
+
+                         $$ = NULL;
+                         YYERROR;
+                       }
+                     | alter_table_start_tokens ddl_qualified_name TOK_RECOVER TOK_PARTITIONS
+                       {
+                         // this is a Hive only syntax
+                         SqlParser_CurrentParser->hiveDDLInfo_->
+                           setValues(TRUE, StmtDDLonHiveObjects::MSCK_, 
+                                     StmtDDLonHiveObjects::TABLE_);
+
+                         if (NOT SqlParser_CurrentParser->hiveDDLInfo_->foundDDL_)
+                           {
+                             *SqlParser_Diags << DgSqlCode(-3242)
+                                              << DgString0("Specified object must be a Hive object.");
+                           }
+ 
+                         $$ = NULL;
+                         YYERROR;
+                       }
 
 ghost : TOK_GHOST
                  {
@@ -32585,6 +32779,9 @@ drop_table_statement : TOK_DROP special_table_name optional_drop_behavior
 drop_table_start_tokens : TOK_DROP TOK_TABLE
                    {
                      $$ = 0;
+
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::DROP_, StmtDDLonHiveObjects::TABLE_);
                    }
                   | TOK_DROP ghost TOK_TABLE
                    {
@@ -32593,13 +32790,17 @@ drop_table_start_tokens : TOK_DROP TOK_TABLE
                   | TOK_DROP TOK_TABLE TOK_IF TOK_EXISTS
                    {
                      $$ = 2;
+
+                     SqlParser_CurrentParser->hiveDDLInfo_->
+                       setValues(TRUE, StmtDDLonHiveObjects::DROP_, StmtDDLonHiveObjects::TABLE_, TRUE);
                    }
                   | TOK_DROP TOK_EXTERNAL TOK_TABLE 
                    {
                      $$ = 3;
                    }
                   | TOK_DROP TOK_EXTERNAL TOK_TABLE TOK_IF TOK_EXISTS
-                   {
+                  {
+                    SqlParser_CurrentParser->hiveDDLInfo_->ifExistsOrNotExists_ = TRUE;
                      $$ = 4;
                    }
 
@@ -32739,12 +32940,17 @@ drop_routine_statement : TOK_DROP drop_routine_type_tokens optional_if_exists_cl
                 }
 
 /* type pStmtDDL */
-drop_view_statement : TOK_DROP TOK_VIEW ddl_qualified_name optional_cleanup
+drop_view_statement : TOK_DROP TOK_VIEW optional_if_exists_clause 
+                        {
+                          SqlParser_CurrentParser->hiveDDLInfo_->
+                            setValues(TRUE, StmtDDLonHiveObjects::DROP_, StmtDDLonHiveObjects::VIEW_, $3);
+                        }
+                      ddl_qualified_name optional_cleanup
                       optional_drop_invalidate_dependent_behavior optional_validate optional_logfile
                 {
                   /* If VALIDATE, or LOG option specified, */
                   /* ALLOW_SPECIALTABLETYPE must also be specified  */
-                  if (($6 || $7) &&
+                  if (($8 || $9) &&
                      !Get_SqlParser_Flags(ALLOW_SPECIALTABLETYPE))
                   {
                     yyerror(""); YYERROR; /*internal syntax only!*/
@@ -32752,18 +32958,25 @@ drop_view_statement : TOK_DROP TOK_VIEW ddl_qualified_name optional_cleanup
                   else
                   {
                     NAString *pLogFile = NULL;
-                    if ($7)
+                    if ($9)
                       pLogFile = new (PARSERHEAP()) NAString
-                        ( $7->data(), PARSERHEAP());
-                    $$ = new (PARSERHEAP())
-		    StmtDDLDropView(
-                                    *$3  /*ddl_qualified_name*/,
-                                    $5   /*optional_drop_invalidate_dependent_behavior*/,
-                                    $4 /*for CLEANUP mode set to TRUE*/,
-                                    $6 /*for VALIDATE mode set to FALSE*/,
+                        ( $9->data(), PARSERHEAP());
+                    StmtDDLDropView * dropView = new (PARSERHEAP())
+                      StmtDDLDropView(
+                                    *$5  /*ddl_qualified_name*/,
+                                    $7   /*optional_drop_invalidate_dependent_behavior*/,
+                                    $6 /*for CLEANUP mode set to TRUE*/,
+                                    $8 /*for VALIDATE mode set to FALSE*/,
                                     pLogFile  /*log_file_name*/);
-                    delete $3 /*ddl_qualified_name*/;
-                    delete $7 /*log_file_name*/;
+
+                    if ($3)
+                      {
+                        dropView->setDropIfExists(TRUE);
+                      }
+
+                    delete $5 /*ddl_qualified_name*/;
+                    delete $9 /*log_file_name*/;
+                    $$ = dropView;
                   }
                 }
 
@@ -33068,7 +33281,7 @@ nsk_node_name: BACKSLASH_SYSTEM_NAME
 // register [internal] hive {table|view|schema} 
 //          [if not exists] <obj-name> [cascade]
 //
-register_hive_statement : TOK_REGISTER optional_internal_clause TOK_HIVE object_identifier optional_if_not_exists_clause ddl_qualified_name optional_cascade
+register_hive_statement : TOK_REGISTER optional_internal_clause TOK_HIVE object_identifier optional_if_not_registered_clause ddl_qualified_name optional_cascade
                           {
                             if (NOT ((*$4 == "TABLE") ||
                                      (*$4 == "VIEW") ||
@@ -33102,7 +33315,7 @@ register_hive_statement : TOK_REGISTER optional_internal_clause TOK_HIVE object_
 // unregister [internal] hive {table|view|schema} 
 //            [if exists] <obj-name> [cascade]
 //
-unregister_hive_statement : TOK_UNREGISTER optional_internal_clause TOK_HIVE object_identifier optional_if_exists_clause ddl_qualified_name optional_cascade optional_cleanup
+unregister_hive_statement : TOK_UNREGISTER optional_internal_clause TOK_HIVE object_identifier optional_if_registered_clause ddl_qualified_name optional_cascade optional_cleanup
                               {
                                 if (NOT ((*$4 == "TABLE") ||
                                          (*$4 == "VIEW") ||
@@ -33135,7 +33348,7 @@ unregister_hive_statement : TOK_UNREGISTER optional_internal_clause TOK_HIVE obj
 
 /* type pStmtDDL */
 // Syntax: register [internal] hbase table [if not exists] <table-name> 
-register_hbase_statement : TOK_REGISTER optional_internal_clause TOK_HBASE TOK_TABLE optional_if_not_exists_clause ddl_qualified_name
+register_hbase_statement : TOK_REGISTER optional_internal_clause TOK_HBASE TOK_TABLE optional_if_not_registered_clause ddl_qualified_name
                           {
                             StmtDDLRegOrUnregObject *pNode = new (PARSERHEAP())
                               StmtDDLRegOrUnregObject(
@@ -33155,7 +33368,7 @@ register_hbase_statement : TOK_REGISTER optional_internal_clause TOK_HBASE TOK_T
 
 /* type pStmtDDL */
 // Syntax: unregister [internal] hbase table [if exists] <table-name>
-unregister_hbase_statement : TOK_UNREGISTER optional_internal_clause TOK_HBASE TOK_TABLE optional_if_exists_clause ddl_qualified_name optional_cleanup
+unregister_hbase_statement : TOK_UNREGISTER optional_internal_clause TOK_HBASE TOK_TABLE optional_if_registered_clause ddl_qualified_name optional_cleanup
                               {
                                 $$ = new (PARSERHEAP())
                                   StmtDDLRegOrUnregObject(
@@ -33223,16 +33436,6 @@ drop_role_statement : TOK_DROP TOK_ROLE authorization_identifier
                                     PARSERHEAP());
                          delete $3;
                       }
-
-/* type pStmtDDL : ALTER DATABASE */
-alter_database_statement: TOK_ALTER TOK_DATABASE enable_status TOK_AUTHORIZATION
- TOK_CHANGES
-                 {
-                   $$ = new (PARSERHEAP()) StmtDDLAlterDatabase
-                     ( StmtDDLAlterDatabase::DBCMDTYPE_AUTHNAME
-                     , $3 );
-                 }
-
 
 /* type pStmtDDL */
 create_component_privilege_stmt : TOK_CREATE TOK_COMPONENT TOK_PRIVILEGE 
@@ -33370,7 +33573,7 @@ create_synonym_stmt : TOK_CREATE TOK_SYNONYM
                                }
 
 /* type longint */
-options : optional_options 
+showplan_options : optional_options 
            {
              if ($1 == NULL)
                {
@@ -33668,6 +33871,7 @@ nonreserved_word :      TOK_ABORT
                       | TOK_CATALOGS
                       | TOK_CATALOG_NAME
 		      | TOK_CATCHUP // MV
+                      | TOK_CENTURY
                       | TOK_CHANGED
 		      | TOK_CHANGES // MV
                       | TOK_CHARS
@@ -33737,6 +33941,7 @@ nonreserved_word :      TOK_ABORT
                       | TOK_DCOMPRESS
                       | TOK_DDL
 		      | TOK_DE			// MV OZ_REFRESH
+                      | TOK_DECADE
                       | TOK_DEFINER
                       | TOK_DEFINITION
                       | TOK_DEFAULTS
@@ -33753,6 +33958,8 @@ nonreserved_word :      TOK_ABORT
                       | TOK_DIVISION
                       | TOK_DO
                       | TOK_DOUBLE_IEEE
+                      | TOK_DOW
+                      | TOK_DOY
                       | TOK_DROP_LIBRARY
                       | TOK_DROP_MV
                       | TOK_DROP_MV_GROUP
@@ -33775,6 +33982,7 @@ nonreserved_word :      TOK_ABORT
                       | TOK_ENTERPRISE
                       | TOK_ENTRY
                       | TOK_ENTRIES
+                      | TOK_EPOCH
                       | TOK_ET
                       | TOK_EUROPEAN
                       | TOK_EXCEPTIONS
@@ -33917,6 +34125,7 @@ nonreserved_word :      TOK_ABORT
                       | TOK_MV  
                       | TOK_MULTI            /* Long Running */
 		      | TOK_MULTIDELTA // MV
+                      | TOK_MSCK
 		      | TOK_MVATTRIBUTE  // MV
 		      | TOK_MVATTRIBUTES // MV
                       | TOK_MV_TABLE  
@@ -33978,6 +34187,7 @@ nonreserved_word :      TOK_ABORT
 		      | TOK_PHASE // MV REFRESH
 		      | TOK_PID
 		      | TOK_PIPELINE // MV REFRESH
+                      | TOK_PLACING
                       | TOK_POOL
 		      | TOK_POPULATE
                       | TOK_POS
@@ -34022,6 +34232,7 @@ nonreserved_word :      TOK_ABORT
                       | TOK_RELOAD
                       | TOK_REMOTE
                       | TOK_RENAME
+                      | TOK_REPAIR
                       | TOK_REPOSITORY
                       | TOK_REQUEST // MV
                       | TOK_REQUIRED
@@ -34065,7 +34276,6 @@ nonreserved_word :      TOK_ABORT
                       | TOK_SHAPE
                       | TOK_SHARE
                       | TOK_SHARED
-	              | TOK_SHOWLEAKS                  
                       | TOK_SIGNED
 		      | TOK_SINGLEDELTA // MV
 //                      | TOK_SIZE
@@ -34146,12 +34356,12 @@ nonreserved_word :      TOK_ABORT
                       | TOK_VSBB
                       | TOK_WAITED
                       | TOK_WAITEDIO
+                      | TOK_WOM
 
 		      	// New words added can be merged into sorted list above
                       | TOK_INVOKE
 		      | TOK_SHOWCONTROL
 		      | TOK_SHOWDDL
-		      | TOK_SHOWLABEL
 		      | TOK_SHOWPLAN
 		      | TOK_SHOWSHAPE
                       | TOK_SHOWSET 		      
@@ -34265,6 +34475,7 @@ nonreserved_func_word:  TOK_ABS
                       | TOK_CONVERTTOHX_INTN
                       | TOK_COS
                       | TOK_COSH
+                      | TOK_CRC32
                       | TOK_CURDATE
                       | TOK_CURTIME
                       | TOK_D_RANK 
@@ -34314,6 +34525,7 @@ nonreserved_func_word:  TOK_ABS
                       | TOK_LTRIM
                       | TOK_MAVG
                       | TOK_MCOUNT
+                      | TOK_MD5
                       | TOK_MMAX
                       | TOK_MMIN
                       | TOK_MOD
@@ -34358,6 +34570,9 @@ nonreserved_func_word:  TOK_ABS
                       | TOK_RTRIM
                       | TOK_RVARIANCE
                       | TOK_SEQNUM
+                      | TOK_SHA
+                      | TOK_SHA1
+                      | TOK_SHA2
                       | TOK_SIGN
                       | TOK_SIN
                       | TOK_SINH
@@ -34384,6 +34599,7 @@ nonreserved_func_word:  TOK_ABS
 			//                      | TOK_UPSERT
                       | TOK_UNIQUE_ID
                       | TOK_UUID
+                      | TOK_SYS_GUID
 		      | TOK_USERNAMEINTTOEXT
                       | TOK_VARIANCE
                       | TOK_WEEK
@@ -34483,6 +34699,8 @@ MP_nonreserved_func_word : TOK_CAST
                          | TOK_LOWER
                          | TOK_MIN
                          | TOK_OCTET_LENGTH
+                         | TOK_OVERLAY
+                         | TOK_STUFF
                          | TOK_POSITION
                          | TOK_REVERSE
                          | TOK_TRIM

@@ -101,11 +101,19 @@ ExEspFragInstanceDir::ExEspFragInstanceDir(CliGlobals *cliGlobals,
   pid_ = phandle.getPin();
 
   tid_ = syscall(SYS_gettid);
-  if (statsGlobals_ == NULL
-    || (statsGlobals_ != NULL && 
-      statsGlobals_->getVersion() != StatsGlobals::CURRENT_SHARED_OBJECTS_VERSION_))
+  NABoolean reportError = FALSE;
+  char msg[256];;
+  if ((statsGlobals_ == NULL)
+     || ((statsGlobals_ != NULL) &&  (statsGlobals_->getInitError(pid_, reportError))))
   {
+    if (reportError) {
+         snprintf(msg, sizeof(msg), 
+          "Version mismatch or Pid %d,%d is higher than the configured pid max %d",
+           cpu_, pid_, statsGlobals_->getConfiguredPidMax()); 
+         SQLMXLoggingArea::logExecRtInfo(__FILE__, __LINE__, msg, 0);
+    }
     statsGlobals_ = NULL;
+
     statsHeap_ = new (heap_) 
         NAHeap("Process Stats Heap", (NAHeap *)heap_,
         8192,
@@ -707,7 +715,7 @@ void ExEspFragInstanceDir::work(Int64 prevWaitTime)
 	      case ACTIVE:
 
 #ifdef NA_DEBUG_GUI
-		if (instances_[currInst]->displayInGui_ == 2)
+		if (instances_[currInst]->displayInGui_ == 1)
 		  instances_[currInst]->globals_->getScheduler()->startGui();
 #endif
 		// To help debugging (dumps): Put current SB TCB in cli globals
@@ -756,6 +764,11 @@ void ExEspFragInstanceDir::work(Int64 prevWaitTime)
                       loopAgain = TRUE;
                     }
                   }
+#ifdef NA_DEBUG_GUI
+		if (instances_[currInst]->fiState_ != ACTIVE &&
+                    instances_[currInst]->displayInGui_ == 1)
+		  instances_[currInst]->globals_->getScheduler()->stopGui();
+#endif
                 break;
 
               case WAIT_TO_RELEASE:

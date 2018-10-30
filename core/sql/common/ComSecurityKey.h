@@ -37,9 +37,10 @@ class ComSecurityKey;
 
 typedef NASet<ComSecurityKey>  ComSecurityKeySet;
 
-bool buildSecurityKeys( const int32_t userID,
-                        const int32_t granteeID,
+bool buildSecurityKeys( const NAList <Int32> &roleGrantees,
+                        const int32_t roleID,
                         const int64_t objectUID,
+                        const bool isColumn,
                         const PrivMgrCoreDesc &privs,
                         ComSecurityKeySet &secKeySet);
 
@@ -80,7 +81,8 @@ public:
     OBJECT_IS_COLUMN,
     SUBJECT_IS_USER,
     SUBJECT_IS_ROLE,
-    OBJECT_IS_SPECIAL_ROLE
+    OBJECT_IS_SPECIAL_ROLE,
+    SUBJECT_IS_GRANT_ROLE
   };
 
   // QISpecialHashValues are used for security keys for special roles
@@ -100,12 +102,21 @@ public:
   ComSecurityKey(
    const int32_t subjectUserID, 
    const int64_t objectUserID, 
-   const QIType typeOfSubject = SUBJECT_IS_USER);
+   const QIType typeOfSubject);
 
   // Constructor for a special role grant to an authID.
   ComSecurityKey(
     const int32_t subjectUserID, 
     const QIType typeOfObject);
+
+  // Constructor for generating revoke role from subject
+  ComSecurityKey(
+    const uint32_t subjectHashValue,
+    const uint32_t objectHashValue)
+  : subjectHash_(subjectHashValue),
+    objectHash_ (objectHashValue),
+    actionType_(COM_QI_USER_GRANT_ROLE)
+  {};
 
   ComSecurityKey();  // do not use
   bool operator == (const ComSecurityKey &other) const;
@@ -136,7 +147,7 @@ public:
   static uint32_t generateHash(int32_t hashID);
 
   // For debugging purposes
-  void print() const ;
+  NAString print(Int32 subject, Int64 object);
 
 private:
   uint32_t subjectHash_ ;

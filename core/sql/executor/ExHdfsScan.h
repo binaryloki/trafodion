@@ -50,7 +50,6 @@ class HdfsClient;
 // Classes referenced in this file
 // -----------------------------------------------------------------------
 class ex_tcb;
-class ExHdfsScanStats;
 class SequenceFileReader;
 class ExpORCinterface;
 
@@ -376,7 +375,7 @@ protected:
   int prevRangeNum_;
   int extraBytesRead_;
   NABoolean recordSkip_;
-  char *errBuf_;
+  int numFiles_;
 };
 
 class ExOrcScanTcb  : public ExHdfsScanTcb

@@ -2268,6 +2268,7 @@ Int32 WildCardOp::getArity() const
     case REL_ANY_GROUP:
     case REL_FORCE_EXCHANGE:
     case REL_ANY_UNARY_TABLE_MAPPING_UDF:
+    case REL_ANY_EXTRACT:
       return 1;
 
     case REL_ANY_BINARY_OP:
@@ -2345,6 +2346,8 @@ const NAString WildCardOp::getText() const
       return "REL_ANY_HASH_JOIN";
     case REL_ANY_MERGE_JOIN:
       return "REL_ANY_MERGE_JOIN";
+    case REL_ANY_EXTRACT:
+      return "REL_ANY_EXTRACT";
     case REL_FORCE_ANY_SCAN:
       return "REL_FORCE_ANY_SCAN";
     case REL_FORCE_EXCHANGE:
@@ -6688,7 +6691,7 @@ void Join::rewriteNotInPredicate( ValueIdSet & origVidSet, ValueIdSet & newVidSe
 Intersect::Intersect(RelExpr *leftChild,
 	     RelExpr *rightChild)
 : RelExpr(REL_INTERSECT, leftChild, rightChild)
-{ setNonCacheable(); }
+{ }
 
 Intersect::~Intersect() {}
 
@@ -6705,7 +6708,7 @@ const NAString Intersect::getText() const
 Except::Except(RelExpr *leftChild,
              RelExpr *rightChild)
 : RelExpr(REL_EXCEPT, leftChild, rightChild)
-{ setNonCacheable(); }
+{ }
 
 Except::~Except() {}
 
@@ -7877,11 +7880,17 @@ NABoolean GroupByAgg::tryToPullUpPredicatesInPreCodeGen(
       else
         pulledPredicates += tempPulledPreds;
 
+      // just remove pulled up predicates from char. input
+      ValueIdSet newInputs(getGroupAttr()->getCharacteristicInputs());
+      myLocalExpr += selectionPred();
+      myLocalExpr -= tempPulledPreds;
+      myLocalExpr.weedOutUnreferenced(newInputs);
+      
       // adjust char. inputs - this is not exactly
       // good style, just overwriting the char. inputs, but
       // hopefully we'll get away with it at this stage in
       // the processing
-      getGroupAttr()->setCharacteristicInputs(myNewInputs);
+      getGroupAttr()->setCharacteristicInputs(newInputs);
     }
 
   // note that we removed these predicates from our node, it's the
@@ -8792,10 +8801,12 @@ void Scan::addIndexInfo()
               for (CollIndex i = 0; i < possibleIndexJoins_.entries(); i++)
                 {
                   NABoolean isASupersetIndex =
-                      possibleIndexJoins_[i]->outputsFromIndex_.contains(newOutputsFromIndex);
+                      possibleIndexJoins_[i]->outputsFromIndex_.contains(newOutputsFromIndex) &&
+                      possibleIndexJoins_[i]->indexPredicates_.contains(newIndexPredicates);
 
                   NABoolean isASubsetIndex =
-                      newOutputsFromIndex.contains(possibleIndexJoins_[i]->outputsFromIndex_) ;
+                      newOutputsFromIndex.contains(possibleIndexJoins_[i]->outputsFromIndex_) &&
+                      newIndexPredicates.contains(possibleIndexJoins_[i]->indexPredicates_);
 
                   NABoolean isASuperOrSubsetIndex = isASupersetIndex || isASubsetIndex;
 
@@ -10252,7 +10263,6 @@ RelExpr *HbaseAccess::bindNode(BindWA *bindWA)
       return this;
     }
 
-  //  CorrName &corrName = (CorrName&)getCorrName();
   CorrName &corrName = getTableName();
   NATable * naTable = NULL;
 
@@ -10263,7 +10273,8 @@ RelExpr *HbaseAccess::bindNode(BindWA *bindWA)
     {
       *CmpCommon::diags()
 	<< DgSqlCode(-1388)
-	<< DgTableName(corrName.getExposedNameAsAnsiString());
+        << DgString0("Object")
+	<< DgString1(corrName.getExposedNameAsAnsiString());
       
       bindWA->setErrStatus();
       return this;
@@ -10753,6 +10764,7 @@ RelRoot::RelRoot(RelExpr *input,
     trueRoot_(FALSE),
     subRoot_(FALSE),
     displayTree_(FALSE),
+    exeDisplay_(FALSE),
     outputVarCnt_(-1),
     inputVarTree_(NULL),
     outputVarTree_(NULL),
@@ -10824,6 +10836,7 @@ RelRoot::RelRoot(RelExpr *input,
     trueRoot_(FALSE),
     subRoot_(FALSE),
     displayTree_(FALSE),
+    exeDisplay_(FALSE),
     outputVarCnt_(-1),
     inputVarTree_(NULL),
     outputVarTree_(NULL),
@@ -10891,6 +10904,7 @@ RelRoot::RelRoot(const RelRoot & other)
     trueRoot_(other.trueRoot_),
     subRoot_(other.subRoot_),
     displayTree_(other.displayTree_),
+    exeDisplay_(other.exeDisplay_),
     outputVarCnt_(other.outputVarCnt_),
     inputVarTree_(other.inputVarTree_),
     outputVarTree_(other.outputVarTree_),
@@ -13330,6 +13344,40 @@ void GenericUpdate::pushdownCoveredExpr(const ValueIdSet &outputExpr,
 				newExternalInputs,
 				predicatesOnParent,
 				&localExprs);
+
+/*to fix jira 18-20180111-2901  
+ *For query " insert into to t1 select seqnum(seq1, next) from t1;", there is no SORT as left child of TSJ, and it 
+ *is a self-referencing updates Halloween problem. In NestedJoin::genWriteOpLeftChildSortReq(), child(0)
+ *producing no outputs for this query, which means that there is no column to sort on. So we solve this by 
+ *having the source for Halloween insert produce at least one output column always.
+ * */
+  if (avoidHalloween() && child(0) &&
+      child(0)->getOperatorType() == REL_SCAN &&
+      child(0)->getGroupAttr())
+    {
+      if (child(0)->getGroupAttr()->getCharacteristicOutputs().isEmpty())
+        {
+          ValueId exprId;
+          ValueId atLeastOne;
+
+          ValueIdSet output_source = child(0)->getTableDescForExpr()->getColumnList();
+          for (exprId = output_source.init();
+               output_source.next(exprId);
+               output_source.advance(exprId))
+            {
+              atLeastOne = exprId;
+              if (!(exprId.getItemExpr()->doesExprEvaluateToConstant(FALSE, TRUE)))
+                {
+                  child(0)->getGroupAttr()->addCharacteristicOutputs(exprId);
+                  break;
+                }
+            }
+         if (child(0)->getGroupAttr()->getCharacteristicOutputs().isEmpty())
+           {
+             child(0)->getGroupAttr()->addCharacteristicOutputs(atLeastOne);
+           }
+        }
+    }	
 }
 
 /*
@@ -13589,7 +13637,6 @@ Delete::Delete(const CorrName &name, TableDesc *tabId, OperatorTypeEnum otype,
 	       ConstStringList * csl,
 	       CollHeap *oHeap)
   : GenericUpdate(name,tabId,otype,child,newRecExpr,currOfCursorName,oHeap),
-    isFastDelete_(FALSE),
     csl_(csl),estRowsAccessed_(0)
 {
   setCacheableNode(CmpMain::BIND);
@@ -13619,7 +13666,6 @@ RelExpr * Delete::copyTopNode(RelExpr *derivedNode, CollHeap* outHeap)
   else
     result = (Delete *) derivedNode;
 
-  result->isFastDelete_       = isFastDelete_;
   result->csl() = csl();
   result->setEstRowsAccessed(getEstRowsAccessed());
 

@@ -206,7 +206,16 @@ restinstalldir=$REST_INSTALL_DIR
 echo "REST_INSTALL_DIR=$restinstalldir"
 
 echo "TRAF_VAR=$TRAF_VAR"
+echo "TRAF_LOG=$TRAF_LOG"
 echo "TRAF_CONF=$TRAF_CONF"
+
+if [[ ! -z "$PID_MAX" ]]; then
+   echo "PID_MAX=$PID_MAX"
+fi
+
+if [[ ! -z "$RMS_SHARED_SEG_SIZE_MB" ]]; then
+   echo "RMS_SHARED_SEG_SIZE_MB=$RMS_SHARED_SEG_SIZE_MB"
+fi
 
 echo ""
 echo ""

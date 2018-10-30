@@ -68,6 +68,7 @@ using std::ofstream;
 #include "ExpHbaseInterface.h"
 #include "ExHbaseAccess.h"
 #include "ExpErrorEnums.h"
+#include "ExpLOBaccess.h"
 #include "HdfsClient_JNI.h"
 
 ///////////////////////////////////////////////////////////////////
@@ -124,9 +125,7 @@ short ExExeUtilCreateTableAsTcb::work()
   ExExeStmtGlobals *exeGlob = getGlobals()->castToExExeStmtGlobals();
   ExMasterStmtGlobals *masterGlob = exeGlob->castToExMasterStmtGlobals();
   ContextCli *currContext = masterGlob->getStatement()->getContext();
-  
-  ExTransaction *ta = getGlobals()->castToExExeStmtGlobals()->
-    castToExMasterStmtGlobals()->getStatement()->getContext()->getTransaction();
+  ExTransaction *ta = currContext->getTransaction();
   
   while (1)
     {
@@ -168,15 +167,16 @@ short ExExeUtilCreateTableAsTcb::work()
 		 ctaTdb().ctQuery_);
 	    if (cliRC < 0)
 	      {
-		if (((cliRC == -1055) || // SQ table err msg
-		     (cliRC == -1390)) && // Traf err msg
+		if (((cliRC == -1055) ||  // SQ table err msg
+		     (cliRC == -1390) ||  // Traf err msg
+		     (cliRC == -1387)) && // Hive err msg
 		    (ctaTdb().loadIfExists()))
 		  {
 		    SQL_EXEC_ClearDiagnostics(NULL);
 		    tableExists_ = TRUE;
 
 		    if (ctaTdb().deleteData())
-		      step_ = DELETE_DATA_;
+		      step_ = TRUNCATE_TABLE_;
 		    else
 		      step_ = ALTER_TO_NOAUDIT_;
 		    break;
@@ -202,14 +202,14 @@ short ExExeUtilCreateTableAsTcb::work()
 	  }
 	break;
 
-	case DELETE_DATA_:
-	case DELETE_DATA_AND_ERROR_:
+	case TRUNCATE_TABLE_:
+	case TRUNCATE_TABLE_AND_ERROR_:
 	  {
 	    char * ddQuery = 
-	      new(getMyHeap()) char[strlen("DELETE DATA FROM; ") + 
+	      new(getMyHeap()) char[strlen("TRUNCATE TABLE; ") + 
 				   strlen(ctaTdb().getTableName()) +
 				   100];
-	    strcpy(ddQuery, "DELETE DATA FROM ");
+	    strcpy(ddQuery, "TRUNCATE TABLE ");
 	    strcat(ddQuery, ctaTdb().getTableName());
 	    strcat(ddQuery, ";");
 	    cliRC = cliInterface()->executeImmediate(ddQuery, NULL,NULL,TRUE,NULL,TRUE);
@@ -219,7 +219,7 @@ short ExExeUtilCreateTableAsTcb::work()
 
 	    if (cliRC < 0)
 	      {
-		if (step_ == DELETE_DATA_)
+		if (step_ == TRUNCATE_TABLE_)
 		  {
 		    step_ = ERROR_;
 		    break;
@@ -232,7 +232,7 @@ short ExExeUtilCreateTableAsTcb::work()
 		break;
 	      }
 
-	    if (step_ == DELETE_DATA_AND_ERROR_)
+	    if (step_ == TRUNCATE_TABLE_AND_ERROR_)
 	      {
 
 		if (doSidetreeInsert_)
@@ -494,7 +494,7 @@ short ExExeUtilCreateTableAsTcb::work()
 	      {
 		// error case and 'load if exists' specified.
 		// Do not drop the table, only delete data from it.
-		step_ = DELETE_DATA_AND_ERROR_;
+		step_ = TRUNCATE_TABLE_AND_ERROR_;
 	      }
 	    else
 	      step_ = DROP_AND_ERROR_;
@@ -535,69 +535,24 @@ short ExExeUtilCreateTableAsTcb::work()
 
 	case DONE_:
 	  {
-	    if (qparent_.up->isFull())
-	      return WORK_OK;
-
-	    // Return EOF.
-	    ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-	    
-	    up_entry->upState.parentIndex = 
-	      pentry_down->downState.parentIndex;
-	    
-	    up_entry->upState.setMatchNo(0);
-	    up_entry->upState.status = ex_queue::Q_NO_DATA;
-	    
-	    // insert into parent
-	    qparent_.up->insert();
-	    
+	    retcode = handleDone();
+	    if (retcode == 1)
+	       return WORK_OK;
 	    step_ = INITIAL_;
-	    qparent_.down->removeHead();
-	    
 	    return WORK_OK;
 	  }
 	break;
 
 	case ERROR_:
 	  {
-	    if (qparent_.up->isFull())
-	      return WORK_OK;
-
-	    // Return EOF.
-	    ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-	    
-	    up_entry->upState.parentIndex = 
-	      pentry_down->downState.parentIndex;
-	    
-	    up_entry->upState.setMatchNo(0);
-	    up_entry->upState.status = ex_queue::Q_SQLERROR;
-
-	    ComDiagsArea *diagsArea = up_entry->getDiagsArea();
-	    
-	    if (diagsArea == NULL)
-	      diagsArea = 
-		ComDiagsArea::allocate(this->getGlobals()->getDefaultHeap());
-            else
-              diagsArea->incrRefCount (); // setDiagsArea call below will decr ref count
-	    
-	    if (getDiagsArea())
-	      diagsArea->mergeAfter(*getDiagsArea());
-	    
-	    up_entry->setDiagsArea (diagsArea);
-	    
-	    // insert into parent
-	    qparent_.up->insert();
-	    
-	    pstate.matches_ = 0;
-
+	    retcode = handleError();
+	    if (retcode == 1)
+	       return WORK_OK;
 	    step_ = DONE_;
 	  }
 	break;
-
-
 	} // switch
     } // while
-
-  
   
   return WORK_OK;
 
@@ -1679,74 +1634,20 @@ short ExExeUtilHBaseBulkLoadTcb::work()
 
     case DONE_:
     {
-      if (qparent_.up->isFull())
-        return WORK_OK;
-
-      // Return EOF.
-      ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-
-      up_entry->upState.parentIndex = pentry_down->downState.parentIndex;
-
-      up_entry->upState.setMatchNo(0);
-      up_entry->upState.status = ex_queue::Q_NO_DATA;
-
-      ComDiagsArea *diagsArea = up_entry->getDiagsArea();
-
-      if (diagsArea == NULL)
-        diagsArea = ComDiagsArea::allocate(getMyHeap());
-      else
-        diagsArea->incrRefCount(); // setDiagsArea call below will decr ref count
-
-      if (getDiagsArea())
-        diagsArea->mergeAfter(*getDiagsArea());
-
+      retcode = handleDone();
+      if (retcode == 1)
+         return WORK_OK;
       masterGlob->setRowsAffected(rowsAffected_);
-
-      up_entry->setDiagsArea(diagsArea);
-
-      // insert into parent
-      qparent_.up->insert();
       step_ = INITIAL_;
-      qparent_.down->removeHead();
       return WORK_OK;
     }
     break;
 
     case LOAD_ERROR_:
     {
-      if (qparent_.up->isFull())
-        return WORK_OK;
-
-      // Return EOF.
-      ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-
-      up_entry->upState.parentIndex = pentry_down->downState.parentIndex;
-
-      up_entry->upState.setMatchNo(0);
-      up_entry->upState.status = ex_queue::Q_SQLERROR;
-
-      ComDiagsArea *diagsArea = up_entry->getDiagsArea();
-
-      if (diagsArea == NULL)
-        diagsArea = ComDiagsArea::allocate(getMyHeap());
-      else
-        diagsArea->incrRefCount(); // setDiagsArea call below will decr ref count
-
-      if (getDiagsArea())
-        {
-        diagsArea->mergeAfter(*getDiagsArea());
-          diagsArea->setRowCount(rowsAffected_);
-        }
-
-      up_entry->setDiagsArea(diagsArea);
-
-      // insert into parent
-      qparent_.up->insert();
-
-      pstate.matches_ = 0;
-
-
-
+      retcode = handleError();
+      if (retcode == 1)
+         return WORK_OK;
       step_ = DONE_;
     }
     break;
@@ -2153,9 +2054,8 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
 
   ex_queue_entry * pentry_down = qparent_.down->getHeadEntry();
   ExExeUtilPrivateState & pstate = *((ExExeUtilPrivateState*) pentry_down->pstate);
-
-  ExTransaction *ta = getGlobals()->castToExExeStmtGlobals()->
-      castToExMasterStmtGlobals()->getStatement()->getContext()->getTransaction();
+  ExMasterStmtGlobals *masterGlob = getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals();
+  ExTransaction *ta = masterGlob->getStatement()->getContext()->getTransaction();
 
   while (1)
   {
@@ -2177,7 +2077,6 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
       {
          ExHbaseAccessTcb::setupError((NAHeap *)getMyHeap(),qparent_, retcode, 
                 "ExpHbaseInterface_JNI::init"); 
-         handleError();
          step_ = UNLOAD_END_ERROR_;
          break;
       }
@@ -2327,7 +2226,6 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
           ExHbaseAccessTcb::setupError((NAHeap *)getMyHeap(),qparent_, hbcRetCode, 
                 "HBaseClient_JNI::createSnapshot/verifySnapshot", 
                 snapshotsList_->at(i)->snapshotName->data() );
-          handleError();
           step_ = UNLOAD_END_ERROR_;
           break;
         }
@@ -2389,7 +2287,6 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
           ExHbaseAccessTcb::setupError((NAHeap *)getMyHeap(),qparent_, hbcRetCode, 
                 "HBaseClient_JNI::createSnapshot/verifySnapshot", 
                 snapshotsList_->at(i)->snapshotName->data() );
-          handleError();
           step_ = UNLOAD_END_ERROR_;
           break;
         }
@@ -2477,36 +2374,11 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
 
     case DONE_:
     {
-      if (qparent_.up->isFull())
+      retcode = handleDone();
+      if (retcode == 1)
         return WORK_OK;
-
-      // Return EOF.
-      ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-
-      up_entry->upState.parentIndex = pentry_down->downState.parentIndex;
-
-      up_entry->upState.setMatchNo(0);
-      up_entry->upState.status = ex_queue::Q_NO_DATA;
-
-      ComDiagsArea *diagsArea = up_entry->getDiagsArea();
-
-      if (diagsArea == NULL)
-        diagsArea = ComDiagsArea::allocate(getMyHeap());
-      else
-        diagsArea->incrRefCount(); // setDiagsArea call below will decr ref count
-
-      diagsArea->setRowCount(rowsAffected_);
-
-      if (getDiagsArea())
-        diagsArea->mergeAfter(*getDiagsArea());
-
-      up_entry->setDiagsArea(diagsArea);
-
-      // insert into parent
-      qparent_.up->insert();
+      masterGlob->setRowsAffected(rowsAffected_);
       step_ = INITIAL_;
-      qparent_.down->removeHead();
-
       freeResources();
       return WORK_OK;
     }
@@ -2514,36 +2386,9 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
 
     case UNLOAD_ERROR_:
     {
-      if (qparent_.up->isFull())
-        return WORK_OK;
-
-      // Return EOF.
-      ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-
-      up_entry->upState.parentIndex = pentry_down->downState.parentIndex;
-
-      up_entry->upState.setMatchNo(0);
-      up_entry->upState.status = ex_queue::Q_SQLERROR;
-
-      ComDiagsArea *diagsArea = up_entry->getDiagsArea();
-
-      if (diagsArea == NULL)
-        diagsArea = ComDiagsArea::allocate(getMyHeap());
-      else
-        diagsArea->incrRefCount(); // setDiagsArea call below will decr ref count
-
-      if (getDiagsArea())
-        diagsArea->mergeAfter(*getDiagsArea());
-
-      up_entry->setDiagsArea(diagsArea);
-
-      // insert into parent
-      qparent_.up->insert();
-
-      pstate.matches_ = 0;
-
-
-
+      retcode = handleError();
+      if (retcode == 1)
+         return WORK_OK;
       step_ = DONE_;
     }
     break;
@@ -2552,7 +2397,6 @@ short ExExeUtilHBaseBulkUnLoadTcb::work()
   } // while
 
   return WORK_OK;
-
 }
 
 short ExExeUtilHBaseBulkUnLoadTcb::moveRowToUpQueue(const char * row, Lng32 len,
@@ -2702,14 +2546,7 @@ ExExeUtilLobExtractTcb::ExExeUtilLobExtractTcb
 
   requestTag_ = -1;
   lobLoc_[0] = '\0';
-  exLobGlobals_ = NULL;
- 
-  ExpLOBinterfaceInit(exLobGlobals_,currContext->exHeap(),currContext,TRUE,
-                      lobTdb().getLobHdfsServer(),
-                      lobTdb().getLobHdfsPort());
-                                     
-    
-
+  exLobGlobals_ = ExpLOBoper::initLOBglobal((NAHeap *)glob->getDefaultHeap(), currContext, exe_util_tdb.useLibHdfs());
 }
 
 void ExExeUtilLobExtractTcb::freeResources()
@@ -2726,6 +2563,7 @@ void ExExeUtilLobExtractTcb::freeResources()
   if (lobHandle_ and lobName_)
     retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -2744,15 +2582,30 @@ void ExExeUtilLobExtractTcb::freeResources()
 	       lobDataLen_, lobData_, 
 	       3, // close
                0); // open type not applicable
-
-    
-  ExpLOBinterfaceCleanup(exLobGlobals_);
+  ExpLOBoper::deleteLOBglobal(exLobGlobals_, (NAHeap *)(NAHeap *)getGlobals()->getDefaultHeap());
   exLobGlobals_ = NULL;
 }
 
 ExExeUtilLobExtractTcb::~ExExeUtilLobExtractTcb()
 {
   freeResources();
+}
+
+ExOperStats * ExExeUtilLobExtractTcb::doAllocateStatsEntry(CollHeap *heap,
+							    ComTdb *tdb)
+{
+  ExEspStmtGlobals *espGlobals = getGlobals()->castToExExeStmtGlobals()->castToExEspStmtGlobals();
+  StmtStats *ss; 
+  if (espGlobals != NULL)
+     ss = espGlobals->getStmtStats();
+  else
+     ss = getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals()->getStatement()->getStmtStats(); 
+  ExHdfsScanStats *hdfsScanStats = new(heap) ExHdfsScanStats(heap,
+				   this,
+				   tdb);
+  if (ss != NULL) 
+     hdfsScanStats->setQueryId(ss->getQueryId(), ss->getQueryIdLen());
+  return hdfsScanStats;
 }
 
 short ExExeUtilLobExtractTcb::work()
@@ -2864,8 +2717,7 @@ short ExExeUtilLobExtractTcb::work()
 		      
 		      Lng32 intParam1 = 0;
 		      ExRaiseSqlError(getHeap(), &diagsArea_, 
-				      (ExeErrorCode)(8444), NULL, &intParam1, 
-				      &cliError, NULL, NULL);
+				      -8448, &intParam1, &cliError, NULL, NULL);
 		      step_ = HANDLE_ERROR_;
 		    }
 		}
@@ -2897,11 +2749,9 @@ short ExExeUtilLobExtractTcb::work()
 		  ex_queue_entry * up_entry = qparent_.up->getTailEntry();
 
 		  // invalid state, should not be reached.
-		  ComDiagsArea *diagsArea = up_entry->getDiagsArea();
 		  ExRaiseSqlError(getMyHeap(),
-				  &diagsArea,
+				  &diagsArea_,
 				  (ExeErrorCode)(EXE_INTERNAL_ERROR));
-                  setDiagsArea(diagsArea);
 		  step_ = CANCEL_;
 		}
 		break;
@@ -3012,37 +2862,9 @@ short ExExeUtilLobExtractTcb::work()
 
             //Retrieve the lobLocation for this lobNum which will be used 
             //in the other steps_ which open and read lob data file.
-            short *lobNumList = new (getHeap()) short[1];
-	    short *lobTypList = new (getHeap()) short[1];
-	    char  **lobLocList = new (getHeap()) char*[1];
-             char  **lobColNameList = new (getHeap()) char*[1];
-	    lobLocList[0] = new (getHeap()) char[1024];
-	    lobColNameList[0] = new (getHeap()) char[256];
-
-	    Lng32 numLobs = lobNum;
-	    Lng32 cliRC = SQL_EXEC_LOBddlInterface
-	      (
-	       schName,
-	       schNameLen,
-	       uid,
-	       numLobs,
-	       LOB_CLI_SELECT_UNIQUE,
-	       lobNumList,
-	       lobTypList,
-	       lobLocList,lobColNameList,lobTdb().getLobHdfsServer(),
-               lobTdb().getLobHdfsPort(),0,FALSE);
-	    if (cliRC < 0)
-	      {
-		getDiagsArea()->mergeAfter(diags);
-
-		step_ = HANDLE_ERROR_;
-		break;
-	      }
-
-	    strcpy(lobLoc_, lobLocList[0]);
-            NADELETEBASIC(lobColNameList[0],getHeap());
-            NADELETEBASIC(lobNumList,getHeap());
-            NADELETEBASIC(lobTypList,getHeap());
+           
+	    strcpy(lobLoc_, lobTdb().getStringParam2());
+           
             if (lobTdb().getToType() == ComTdbExeUtilLobExtract::RETRIEVE_HDFSFILENAME_)
 	      step_ = EXTRACT_HDFSFILENAME_;
             else if (lobTdb().getToType() == ComTdbExeUtilLobExtract::RETRIEVE_OFFSET_)
@@ -3054,12 +2876,9 @@ short ExExeUtilLobExtractTcb::work()
 	      else
 		{
 		  // invalid "toType"
-		  ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-		  ComDiagsArea *diagsArea = up_entry->getDiagsArea();
 		  ExRaiseSqlError(getMyHeap(),
-				  &diagsArea,
+				  &diagsArea_,
 				  (ExeErrorCode)(EXE_INTERNAL_ERROR));
-                  setDiagsArea(diagsArea);
 		  step_ = CANCEL_;
 		
 		break;
@@ -3222,6 +3041,7 @@ short ExExeUtilLobExtractTcb::work()
 		if(lobTdb().appendOrCreate())
 		  tgtFlags = Lob_Append_Or_Create;
 		retcode = ExpLOBInterfaceSelect(lobGlobs, 
+                                                (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 						lobName_,
 						lobLoc_,
 						lobType_,
@@ -3245,7 +3065,7 @@ short ExExeUtilLobExtractTcb::work()
 		    ExRaiseSqlError(getHeap(), &diagsArea_, 
 				    (ExeErrorCode)(8442), NULL, &intParam1, 
 				    &cliError, NULL, (char*)"ExpLOBInterfaceSelect",
-				    getLobErrStr(intParam1));
+		                    getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		    step_ = HANDLE_ERROR_;
 		    break;
 		  }
@@ -3266,6 +3086,7 @@ short ExExeUtilLobExtractTcb::work()
 	  {
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -3291,7 +3112,7 @@ short ExExeUtilLobExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
@@ -3316,6 +3137,7 @@ short ExExeUtilLobExtractTcb::work()
                 
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -3344,7 +3166,7 @@ short ExExeUtilLobExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
@@ -3370,12 +3192,9 @@ short ExExeUtilLobExtractTcb::work()
 	    else
 	      {
 		// No other "toType" shoudl reach here - i.e TO_FILE_ or TO_STRING
-		ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-		ComDiagsArea *diagsArea = up_entry->getDiagsArea();
 		ExRaiseSqlError(getMyHeap(),
-				&diagsArea,
+				&diagsArea_,
 				(ExeErrorCode)(EXE_INTERNAL_ERROR));
-                setDiagsArea(diagsArea);
 		step_ = CANCEL_;
 		
 		break;
@@ -3388,6 +3207,7 @@ short ExExeUtilLobExtractTcb::work()
 	  {
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -3415,7 +3235,7 @@ short ExExeUtilLobExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      } 
@@ -3448,7 +3268,6 @@ short ExExeUtilLobExtractTcb::work()
 	    retcode = handleError();
 	    if (retcode == 1)
 	      return WORK_OK;
-
 	    step_ = DONE_;
 	  }
 	  break;
@@ -3458,7 +3277,6 @@ short ExExeUtilLobExtractTcb::work()
 	    retcode = handleDone();
 	    if (retcode == 1)
 	      return WORK_OK;
-
 	    step_ = EMPTY_;
 	    return WORK_OK;
 	  }
@@ -3523,10 +3341,8 @@ ExExeUtilLobUpdateTcb::ExExeUtilLobUpdateTcb
   lobHandleLen_ = 2050;
   lobHandle_[0] = '\0';
   exLobGlobals_=NULL;
-
-  ExpLOBinterfaceInit(exLobGlobals_,currContext->exHeap(),currContext,TRUE,
-                      lobTdb().getLobHdfsServer(),
-                      lobTdb().getLobHdfsPort());
+  memset(lobLockId_,'\0',LOB_LOCK_ID_SIZE);
+  exLobGlobals_ = ExpLOBoper::initLOBglobal((NAHeap *)glob->getDefaultHeap(), currContext, exe_util_lobupdate_tdb.useLibHdfs());
                                      
 }
 ExExeUtilLobUpdateTcb::~ExExeUtilLobUpdateTcb()
@@ -3536,18 +3352,31 @@ ExExeUtilLobUpdateTcb::~ExExeUtilLobUpdateTcb()
 
 void ExExeUtilLobUpdateTcb::freeResources()
 {
- ContextCli *currContext =
-    getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals()->
-    getStatement()->getContext();
- ExpLOBinterfaceCleanup(exLobGlobals_);
+ ExpLOBoper::deleteLOBglobal(exLobGlobals_, (NAHeap *)getGlobals()->getDefaultHeap());
  exLobGlobals_ = NULL;
+}
+
+ExOperStats * ExExeUtilLobUpdateTcb::doAllocateStatsEntry(CollHeap *heap,
+							    ComTdb *tdb)
+{
+  ExEspStmtGlobals *espGlobals = getGlobals()->castToExExeStmtGlobals()->castToExEspStmtGlobals();
+  StmtStats *ss; 
+  if (espGlobals != NULL)
+     ss = espGlobals->getStmtStats();
+  else
+     ss = getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals()->getStatement()->getStmtStats(); 
+  ExHdfsScanStats *hdfsScanStats = new(heap) ExHdfsScanStats(heap,
+				   this,
+				   tdb);
+  if (ss != NULL) 
+     hdfsScanStats->setQueryId(ss->getQueryId(), ss->getQueryIdLen());
+  return hdfsScanStats;
 }
 
 short ExExeUtilLobUpdateTcb::work()
 {
   Lng32 cliRC = 0;
   Lng32 retcode = 0;
-
   // if no parent request, return
   if (qparent_.down->isEmpty())
     return WORK_OK;
@@ -3623,10 +3452,8 @@ short ExExeUtilLobUpdateTcb::work()
             else
 		{
 		  // invalid "fromType"
-		  ex_queue_entry * up_entry = qparent_.up->getTailEntry();
-		  ComDiagsArea * da = up_entry->getDiagsArea();
 		  ExRaiseSqlError(getMyHeap(),
-				  &da,
+				  &diagsArea_,
 				  (ExeErrorCode)(EXE_INTERNAL_ERROR));
 		  step_ = CANCEL_;
 		
@@ -3653,42 +3480,33 @@ short ExExeUtilLobUpdateTcb::work()
 	    lobName_ = ExpLOBoper::ExpGetLOBname(uid, lobNum, lobNameBuf_, 1000);
 
 	    lobDataLen_ = lobTdb().totalBufSize_; 
-            short *lobNumList = new (getHeap()) short[1];
-	    short *lobTypList = new (getHeap()) short[1];
-	    char  **lobLocList = new (getHeap()) char*[1];
-            char  **lobColNameList = new (getHeap()) char*[1];
-	    lobLocList[0] = new (getHeap()) char[1024];
-	    lobColNameList[0] = new (getHeap()) char[256];
-          
-	    Lng32 numLobs = lobNum;
-	    Lng32 cliRC = SQL_EXEC_LOBddlInterface
-	      (
-	       schName,
-	       schNameLen,
-	       uid,
-	       numLobs,
-	       LOB_CLI_SELECT_UNIQUE,
-	       lobNumList,
-	       lobTypList,
-	       lobLocList,lobColNameList,lobTdb().getLobHdfsServer(),
-               lobTdb().getLobHdfsPort(),0,FALSE);
-	    if (cliRC < 0)
-	      {
-		getDiagsArea()->mergeAfter(diags);
-
-		step_ = HANDLE_ERROR_;
-		break;
-	      }
-
-	    strcpy(lobLoc_, lobLocList[0]);
-            NADELETEBASIC(lobLocList[0],getHeap());
-            NADELETEBASIC(lobColNameList[0],getHeap());
-            NADELETEBASIC(lobNumList,getHeap());
-            NADELETEBASIC(lobTypList,getHeap());
+           
+            strcpy(lobLoc_, lobTdb().getLobLocation());
+	    
             char outLobHandle[LOB_HANDLE_LEN];
             Int32 outHandleLen;
             Int64 requestTag = 0;
+            if (lobTdb().lobLocking())
+              {
+                ExpLOBoper::genLobLockId(uid,lobNum,lobLockId_);
+                NABoolean found = FALSE;
+                retcode = SQL_EXEC_CheckLobLock(lobLockId_ , &found);
+                if (! retcode && !found) 
+                  {    
+                    retcode = SQL_EXEC_SetLobLock(lobLockId_);
+                  }
+                else if (found)
+                  {
+                    memset(lobLockId_,'\0',LOB_LOCK_ID_SIZE);
+                    ExRaiseSqlError(getHeap(), &diagsArea_, 
+                                    (ExeErrorCode)(EXE_LOB_CONCURRENT_ACCESS_ERROR)); 
+                               
+                    step_=HANDLE_ERROR_;
+                    break;
+                  }
+              }
             retcode = ExpLOBInterfaceUpdate(lobGlobs,
+                                            (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
                                             lobTdb().getLobHdfsServer(),
                                             lobTdb().getLobHdfsPort(),
                                             lobName_,
@@ -3718,7 +3536,7 @@ short ExExeUtilLobUpdateTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceUpdate",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }  
@@ -3748,42 +3566,31 @@ short ExExeUtilLobUpdateTcb::work()
 	    lobName_ = ExpLOBoper::ExpGetLOBname(uid, lobNum, lobNameBuf_, 1000);
 
 	    lobDataLen_ = lobTdb().totalBufSize_; 
-            short *lobNumList = new (getHeap()) short[1];
-	    short *lobTypList = new (getHeap()) short[1];
-	    char  **lobLocList = new (getHeap()) char*[1];
-            char  **lobColNameList = new (getHeap()) char*[1];
-	    lobLocList[0] = new (getHeap()) char[1024];
-            lobColNameList[0] = new (getHeap()) char[256];
-	    
-	    Lng32 numLobs = lobNum;
-	    Lng32 cliRC = SQL_EXEC_LOBddlInterface
-	      (
-	       schName,
-	       schNameLen,
-	       uid,
-	       numLobs,
-	       LOB_CLI_SELECT_UNIQUE,
-	       lobNumList,
-	       lobTypList,
-	       lobLocList,lobColNameList,lobTdb().getLobHdfsServer(),
-               lobTdb().getLobHdfsPort(),0,FALSE);
-	    if (cliRC < 0)
-	      {
-		getDiagsArea()->mergeAfter(diags);
-
-		step_ = HANDLE_ERROR_;
-		break;
-	      }
-
-	    strcpy(lobLoc_, lobLocList[0]);
-            NADELETEBASIC(lobLocList[0],getHeap());
-            NADELETEBASIC(lobColNameList[0],getHeap());
-            NADELETEBASIC(lobNumList,getHeap());
-            NADELETEBASIC(lobTypList,getHeap());
+            strcpy(lobLoc_, lobTdb().getLobLocation());
+           
+            if (lobTdb().lobLocking())
+              {
+                ExpLOBoper::genLobLockId(uid,lobNum,lobLockId_);;
+                NABoolean found = FALSE;
+                retcode = SQL_EXEC_CheckLobLock(lobLockId_, &found);
+                if (! retcode && !found) 
+                  {    
+                    retcode = SQL_EXEC_SetLobLock(lobLockId_);
+                  }
+                else if (found)
+                  {
+                    memset(lobLockId_,'\0',LOB_LOCK_ID_SIZE);
+                    ExRaiseSqlError(getHeap(), &diagsArea_, 
+                                    (ExeErrorCode)(EXE_LOB_CONCURRENT_ACCESS_ERROR));
+                    step_=HANDLE_ERROR_;
+                    break;
+                  }
+              }
             char outLobHandle[LOB_HANDLE_LEN];
             Int32 outHandleLen;
             Int64 requestTag = 0;
             retcode = ExpLOBInterfaceUpdateAppend(lobGlobs,
+                                            (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
                                             lobTdb().getLobHdfsServer(),
                                             lobTdb().getLobHdfsPort(),
                                             lobName_,
@@ -3813,7 +3620,7 @@ short ExExeUtilLobUpdateTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceUpdate",
-			 	getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }  
@@ -3844,43 +3651,32 @@ short ExExeUtilLobUpdateTcb::work()
 	    lobName_ = ExpLOBoper::ExpGetLOBname(uid, lobNum, lobNameBuf_, 1000);
 
 	    lobDataLen_ = lobTdb().totalBufSize_; 
-            short *lobNumList = new (getHeap()) short[1];
-	    short *lobTypList = new (getHeap()) short[1];
-	    char  **lobLocList = new (getHeap()) char*[1];
-            char  **lobColNameList = new (getHeap()) char*[1];
-	    lobLocList[0] = new (getHeap()) char[1024];
-	    lobColNameList[0] = new (getHeap()) char[256];
-	    Lng32 numLobs = lobNum;
-	    Lng32 cliRC = SQL_EXEC_LOBddlInterface
-	      (
-	       schName,
-	       schNameLen,
-	       uid,
-	       numLobs,
-	       LOB_CLI_SELECT_UNIQUE,
-	       lobNumList,
-	       lobTypList,
-	       lobLocList,lobColNameList,lobTdb().getLobHdfsServer(),
-               lobTdb().getLobHdfsPort(),0,FALSE);
-	    if (cliRC < 0)
-	      {
-		getDiagsArea()->mergeAfter(diags);
+            strcpy(lobLoc_, lobTdb().getLobLocation());
 
-		step_ = HANDLE_ERROR_;
-		break;
-	      }
-
-	    strcpy(lobLoc_, lobLocList[0]);
-            NADELETEBASIC(lobLocList[0],getHeap());
-            NADELETEBASIC(lobColNameList[0],getHeap());
-            NADELETEBASIC(lobNumList,getHeap());
-            NADELETEBASIC(lobTypList,getHeap());
-           
+            if (lobTdb().lobLocking())
+              {
+                ExpLOBoper::genLobLockId(uid,lobNum,lobLockId_);;
+                NABoolean found = FALSE;
+                retcode = SQL_EXEC_CheckLobLock(lobLockId_, &found);
+                if (! retcode && !found) 
+                  {    
+                    retcode = SQL_EXEC_SetLobLock(lobLockId_);
+                  }
+                else if (found || retcode )
+                  {
+                    memset(lobLockId_,'\0',LOB_LOCK_ID_SIZE);
+                    ExRaiseSqlError(getHeap(), &diagsArea_, 
+                                    (ExeErrorCode)(EXE_LOB_CONCURRENT_ACCESS_ERROR));
+                    step_=HANDLE_ERROR_;
+                    break;
+                  }
+              }
             char outLobHandle[LOB_HANDLE_LEN];
             Int32 outHandleLen;
             Int64 requestTag = 0;
           
             retcode = ExpLOBInterfaceUpdate(lobGlobs,
+                                            (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
                                             lobTdb().getLobHdfsServer(),
                                             lobTdb().getLobHdfsPort(),
                                             lobName_,
@@ -3910,7 +3706,7 @@ short ExExeUtilLobUpdateTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceUpdate",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }  
@@ -3941,8 +3737,13 @@ short ExExeUtilLobUpdateTcb::work()
         case HANDLE_ERROR_:
           {
             retcode = handleError();
+
 	    if (retcode == 1)
-	      return WORK_OK;
+              {
+                if (lobLockId_[0] && lobTdb().lobLocking())
+                  retcode = SQL_EXEC_ReleaseLobLock(lobLockId_);
+                return WORK_OK;
+              }
 	    step_ = DONE_;
             
           }
@@ -3950,6 +3751,8 @@ short ExExeUtilLobUpdateTcb::work()
         case DONE_:
           {
             retcode = handleDone();
+            if(lobLockId_[0] && lobTdb().lobLocking())
+              retcode = SQL_EXEC_ReleaseLobLock(lobLockId_);
 	    if (retcode == 1)
 	      return WORK_OK;
 
@@ -3974,8 +3777,7 @@ NABoolean ExExeUtilFileExtractTcb::needStatsEntry()
     return FALSE;
 }
 
-ExOperStats * ExExeUtilFileExtractTcb::doAllocateStatsEntry(
-							    CollHeap *heap,
+ExOperStats * ExExeUtilFileExtractTcb::doAllocateStatsEntry(CollHeap *heap,
 							    ComTdb *tdb)
 {
   ExEspStmtGlobals *espGlobals = getGlobals()->castToExExeStmtGlobals()->castToExEspStmtGlobals();
@@ -3984,7 +3786,6 @@ ExOperStats * ExExeUtilFileExtractTcb::doAllocateStatsEntry(
      ss = espGlobals->getStmtStats();
   else
      ss = getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals()->getStatement()->getStmtStats(); 
-  
   ExHdfsScanStats *hdfsScanStats = new(heap) ExHdfsScanStats(heap,
 				   this,
 				   tdb);
@@ -4050,6 +3851,7 @@ short ExExeUtilFileExtractTcb::work()
 
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -4076,7 +3878,7 @@ short ExExeUtilFileExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor/open",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
@@ -4096,6 +3898,7 @@ short ExExeUtilFileExtractTcb::work()
 
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -4122,7 +3925,7 @@ short ExExeUtilFileExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor/read",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
@@ -4153,6 +3956,7 @@ short ExExeUtilFileExtractTcb::work()
 	  {
 	    retcode = ExpLOBInterfaceSelectCursor
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -4177,12 +3981,12 @@ short ExExeUtilFileExtractTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceSelectCursor/close",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
 
-	    step_ = COLLECT_STATS_;
+	    step_ = DONE_;
 	  }
 	  break;
 
@@ -4192,30 +3996,6 @@ short ExExeUtilFileExtractTcb::work()
 	    if (retcode == 1)
 	      return WORK_OK;
 
-	    step_ = DONE_;
-	  }
-	  break;
-
-	case COLLECT_STATS_:
-	  {
-	    if (! getStatsEntry())
-	      {
-		step_ = DONE_;
-		break;
-	      }
-
-	    ExHdfsScanStats * stats =
-	      getStatsEntry()->castToExHdfsScanStats();
-
-	    retcode = ExpLOBinterfaceStats
-	      (lobGlobs,
-	       stats->lobStats(),
-	       lobName_, 
-	       lobLoc_,
-	       lobType_,
-	       lobTdb().getLobHdfsServer(),
-	       lobTdb().getLobHdfsPort());
-	    
 	    step_ = DONE_;
 	  }
 	  break;
@@ -4243,6 +4023,23 @@ ExExeUtilFileLoadTcb::ExExeUtilFileLoadTcb
  ex_globals * glob)
   : ExExeUtilLobExtractTcb(exe_util_tdb, child_tcb, glob)
 {
+}
+
+ExOperStats * ExExeUtilFileLoadTcb::doAllocateStatsEntry(CollHeap *heap,
+							    ComTdb *tdb)
+{
+  ExEspStmtGlobals *espGlobals = getGlobals()->castToExExeStmtGlobals()->castToExEspStmtGlobals();
+  StmtStats *ss; 
+  if (espGlobals != NULL)
+     ss = espGlobals->getStmtStats();
+  else
+     ss = getGlobals()->castToExExeStmtGlobals()->castToExMasterStmtGlobals()->getStatement()->getStmtStats(); 
+  ExHdfsScanStats *hdfsScanStats = new(heap) ExHdfsScanStats(heap,
+				   this,
+				   tdb);
+  if (ss != NULL) 
+     hdfsScanStats->setQueryId(ss->getQueryId(), ss->getQueryIdLen());
+  return hdfsScanStats;
 }
 
 short ExExeUtilFileLoadTcb::work()
@@ -4312,7 +4109,7 @@ short ExExeUtilFileLoadTcb::work()
 		    ExRaiseSqlError(getHeap(), &diagsArea_, 
 				    (ExeErrorCode)(8442), NULL, &intParam1, 
 				    &cliError, NULL, (char*)"ExpLOBInterfaceCreate",
-				    getLobErrStr(intParam1));
+		                    getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		    step_ = HANDLE_ERROR_;
 		    break;
 		  }
@@ -4401,6 +4198,7 @@ short ExExeUtilFileLoadTcb::work()
 	    Int64 dummy;
 	    retcode = ExpLOBInterfaceInsert
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -4427,7 +4225,7 @@ short ExExeUtilFileLoadTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceInsert",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
@@ -4443,6 +4241,7 @@ short ExExeUtilFileLoadTcb::work()
 	  {
 	    retcode = ExpLOBinterfaceCloseFile
 	      (lobGlobs,
+               (getStatsEntry() != NULL ? getStatsEntry()->castToExHdfsScanStats() : NULL),
 	       lobName_, 
 	       lobLoc_,
 	       lobType_,
@@ -4457,7 +4256,7 @@ short ExExeUtilFileLoadTcb::work()
 		ExRaiseSqlError(getHeap(), &diagsArea_, 
 				(ExeErrorCode)(8442), NULL, &intParam1, 
 				&cliError, NULL, (char*)"ExpLOBInterfaceCloseFile",
-				getLobErrStr(intParam1));
+		                getLobErrStr(intParam1), (char*)getSqlJniErrorStr());
 		step_ = HANDLE_ERROR_;
 		break;
 	      }
